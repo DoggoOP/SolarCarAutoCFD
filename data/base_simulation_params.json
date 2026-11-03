@@ -486,7 +486,7 @@
             "turbulenceSpecificationSpalartAllmaras": "TURBULENT_VISCOSITY_RATIO_SA",
             "turbulenceSpecificationKomega": "BC_TURBULENT_VISCOSITY_RATIO_AND_INTENSITY_KOMEGA",
             "turbulentViscosityRatio": {
-              "value": 0.21043825715555026
+              "value": 5
             },
             "turbulenceIntensity": {
               "value": 0.05
@@ -516,7 +516,7 @@
           "turbulentVariableInitializationTypeSa": "INIT_FARFIELD_VALUES_SA",
           "turbulentVariableInitializationTypeKomega": "INIT_FARFIELD_VALUES_KOMEGA",
           "initTurbulentViscosityRatio": {
-            "value": 0.21043825715555026
+            "value": 5
           },
           "initTurbulenceIntensity": {
             "value": 0.05

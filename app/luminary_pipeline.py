@@ -29,6 +29,8 @@ CancellationCheck = Callable[[], bool]
 
 DEFAULT_TRANSITION_MODEL = "GAMMA_RE_THETA_2009"
 DEFAULT_TURBULENCE_MODEL = "KOMEGA_SST"
+SST_FARFIELD_VISCOSITY_RATIO = 5.0
+SA_FARFIELD_VISCOSITY_RATIO = 0.21043825715555026
 TRANSITION_MODEL_CHOICES = {
     "NO_TRANSITION",
     "GAMMA_2015",
@@ -288,10 +290,19 @@ class SimulationTemplateBuilder:
             turbulence.setdefault("qcrSst", "SST_QCR2000")
             turbulence.pop("qcrSa", None)
             turbulence.pop("rotationCorrectionSa", None)
+            viscosity_ratio = SST_FARFIELD_VISCOSITY_RATIO
         elif turbulence_model == "SPALART_ALLMARAS":
             turbulence.setdefault("qcrSa", "QCR_OFF")
             turbulence.setdefault("rotationCorrectionSa", "ROTATION_CORRECTION_OFF")
             turbulence.pop("qcrSst", None)
+            viscosity_ratio = SA_FARFIELD_VISCOSITY_RATIO
+
+        for boundary in fluid_physics.get("boundaryConditionsFluid", []):
+            if boundary.get("physicalBoundary") == "FARFIELD":
+                boundary.setdefault("turbulentViscosityRatio", {})["value"] = viscosity_ratio
+        fluid_physics.setdefault("initializationFluid", {}).setdefault(
+            "initTurbulentViscosityRatio", {}
+        )["value"] = viscosity_ratio
 
     def dump_payload(self, payload: dict, *, label: Optional[str] = None) -> Path:
         """Persist the payload to dumps/ for debugging."""
