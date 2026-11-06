@@ -322,7 +322,7 @@
     "targetCvMillions": {
       "value": "10"
     },
-    "allTet": "ALL_TET_ON",
+    "allTet": "ALL_TET_OFF",
     "userScaling": {
       "value": 1
     }

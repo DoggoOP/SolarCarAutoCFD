@@ -31,6 +31,9 @@ DEFAULT_TRANSITION_MODEL = "GAMMA_RE_THETA_2009"
 DEFAULT_TURBULENCE_MODEL = "KOMEGA_SST"
 SST_FARFIELD_VISCOSITY_RATIO = 5.0
 SA_FARFIELD_VISCOSITY_RATIO = 0.21043825715555026
+ADAPTATION_BOUNDARY_LAYERS = 30
+ADAPTATION_BOUNDARY_LAYER_INITIAL_SIZE = 1e-5  # metres
+ADAPTATION_BOUNDARY_LAYER_GROWTH_RATE = 1.2
 TRANSITION_MODEL_CHOICES = {
     "NO_TRANSITION",
     "GAMMA_2015",
@@ -238,21 +241,47 @@ class SimulationTemplateBuilder:
             turbulence_model=turbulence_model,
         )
 
-        # Configure adaptive mesh refinement
-        # On Railway (production), enable Lumi Mesh Adaptation with target of 10M CVs
+        # Configure adaptive mesh refinement and its manual boundary layer.
+        # On Railway (production), enable Lumi Mesh Adaptation with target of 10M CVs.
         # On localhost (development), disable adaptation completely (generate minimal mesh only)
         import os
         is_production = os.getenv("RAILWAY_ENVIRONMENT") is not None
 
         amr = payload.setdefault("adaptiveMeshRefinement", {})
 
+        # ALL_TET_ON enables Luminary's automatic boundary layer and ignores
+        # boundaryLayerProfile. Select only wall BC surfaces for the manual profile;
+        # the farfield must never receive adaptation prism layers.
+        farfield_surface_set = {
+            surface
+            for bc in physics["boundaryConditionsFluid"]
+            if bc.get("physicalBoundary") == "FARFIELD"
+            for surface in bc.get("surfaces", [])
+        }
+        wall_surfaces = list(dict.fromkeys(
+            surface
+            for bc in physics["boundaryConditionsFluid"]
+            if bc.get("physicalBoundary") == "WALL"
+            for surface in bc.get("surfaces", [])
+            if surface not in farfield_surface_set
+        ))
+        if not wall_surfaces:
+            raise ValueError("No wall surfaces available for the adaptation boundary layer.")
+        amr["allTet"] = "ALL_TET_OFF"
+        amr["boundaryLayerProfile"] = [{
+            "nLayers": {"value": ADAPTATION_BOUNDARY_LAYERS},
+            "initialSize": {"value": ADAPTATION_BOUNDARY_LAYER_INITIAL_SIZE},
+            "growthRate": {"value": ADAPTATION_BOUNDARY_LAYER_GROWTH_RATE},
+            "surfaces": wall_surfaces,
+        }]
+
         if is_production:
             # Production: Enable Lumi Mesh Adaptation with 10M CVs
             amr["meshingMethod"] = "MESH_METHOD_AUTO"
-            amr.setdefault("target_cv_millions", {})["value"] = 10
+            amr.setdefault("targetCvMillions", {})["value"] = 10
         else:
-            # Local development: Generate minimal mesh only (no adaptation)
-            amr["meshingMethod"] = "MESH_METHOD_MINIMAL"
+            # Local development: use the supplied base mesh without adaptation.
+            amr["meshingMethod"] = "MESH_METHOD_MANUAL"
 
         return payload
 
