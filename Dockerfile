@@ -35,7 +35,9 @@ WORKDIR /app
 COPY --from=builder /build/build/shellpower-cli /app/shellpower-cli
 
 # Install Python dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends gcc libgl1 libglu1-mesa \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc libgl1 libglu1-mesa libxrender1 libxcursor1 libxfixes3 libxext6 \
+    libxft2 libfontconfig1 libxinerama1 libx11-6 libgomp1 zlib1g \
     && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
