@@ -23,6 +23,7 @@ class JobLogEntry:
 class JobRecord:
     job_id: str
     title: str
+    fingerprint: Optional[str] = None
     created_at: float = field(default_factory=time.time)
     status: str = "pending"
     log: List[JobLogEntry] = field(default_factory=list)
@@ -55,6 +56,25 @@ class JobStore:
         with self._lock:
             self._jobs[job_id] = record
         return job_id
+
+    def create_or_get_active(self, title: str, fingerprint: str) -> tuple[str, bool]:
+        """Return an existing identical active job, or atomically create one."""
+        with self._lock:
+            for record in self._jobs.values():
+                if record.fingerprint == fingerprint and record.status in ("pending", "running"):
+                    return record.job_id, False
+            job_id = uuid4().hex
+            self._jobs[job_id] = JobRecord(
+                job_id=job_id, title=title, fingerprint=fingerprint
+            )
+            return job_id, True
+
+    def get_active_by_fingerprint(self, fingerprint: str) -> Optional[str]:
+        with self._lock:
+            for record in self._jobs.values():
+                if record.fingerprint == fingerprint and record.status in ("pending", "running"):
+                    return record.job_id
+        return None
 
     def append(self, job_id: str, message: str) -> None:
         entry = JobLogEntry(timestamp=time.time(), message=message)

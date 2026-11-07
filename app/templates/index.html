@@ -341,7 +341,9 @@
         const payload = await response.json();
         if (response.ok) {
           latestJobId = payload.job_id;
-          resultBox.textContent = `✓ Job submitted successfully: ${payload.job_id}`;
+          resultBox.textContent = payload.duplicate
+            ? `✓ Identical run already active; showing job: ${payload.job_id}`
+            : `✓ Job submitted successfully: ${payload.job_id}`;
           resultBox.style.color = "#059669";
 
           // Immediately refresh jobs to show the new one at top

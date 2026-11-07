@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict
 from pathlib import Path
 from threading import Lock
 from typing import Collection, List, Optional, Tuple
@@ -83,6 +86,17 @@ def _parse_choice(raw: str, allowed: Collection[str], field_name: str) -> str:
             detail=f"Invalid {field_name}. Expected one of: {allowed_text}.",
         )
     return value
+
+
+def _case_fingerprint(config: CaseConfig, cad_bytes: bytes) -> str:
+    """Identify the same input and settings across separate uploads."""
+    parameters = asdict(config)
+    parameters.pop("cad_path")  # Each upload gets a fresh random path.
+    canonical = json.dumps(
+        {"cad_sha256": hashlib.sha256(cad_bytes).hexdigest(), "parameters": parameters},
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -182,14 +196,6 @@ async def run_case(
     shellpower_ignore_curvature_limit: bool = Form(False),
 ) -> JSONResponse:
     global _last_submission_time  # noqa: PLW0603
-    now = time.monotonic()
-    with _submission_lock:
-        if now - _last_submission_time < 10.0:
-            raise HTTPException(
-                status_code=429,
-                detail="Please wait a few seconds before starting another simulation.",
-            )
-        _last_submission_time = now
     if not cad_file.filename:
         raise HTTPException(status_code=400, detail="CAD filename missing.")
 
@@ -215,11 +221,9 @@ async def run_case(
 
     file_suffix = Path(cad_file.filename).suffix or ".cad"
     upload_path = settings.uploads_dir / f"{uuid4().hex}{file_suffix}"
+    cad_bytes = await cad_file.read()
     with upload_path.open("wb") as buffer:
-        buffer.write(await cad_file.read())
-
-    job_id = job_store.create(f"AutoCFD run for {cad_label}")
-    job_store.append(job_id, f"Uploaded CAD to {upload_path}.")
+        buffer.write(cad_bytes)
 
     shellpower_area_override = _parse_optional_float(shellpower_target_area)
 
@@ -250,6 +254,25 @@ async def run_case(
         shellpower_dual_shadow=shellpower_dual_shadow,
         shellpower_ignore_curvature_limit=shellpower_ignore_curvature_limit,
     )
+
+    fingerprint = _case_fingerprint(case_config, cad_bytes)
+    with _submission_lock:
+        existing_job_id = job_store.get_active_by_fingerprint(fingerprint)
+        if existing_job_id:
+            upload_path.unlink(missing_ok=True)
+            return JSONResponse({"job_id": existing_job_id, "duplicate": True})
+        now = time.monotonic()
+        if now - _last_submission_time < 10.0:
+            upload_path.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=429,
+                detail="Please wait a few seconds before starting another simulation.",
+            )
+        job_id, _ = job_store.create_or_get_active(
+            f"AutoCFD run for {cad_label}", fingerprint
+        )
+        _last_submission_time = now
+    job_store.append(job_id, f"Uploaded CAD to {upload_path}.")
 
     def _log(message: str) -> None:
         job_store.append(job_id, message)
