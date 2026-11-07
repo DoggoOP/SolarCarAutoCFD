@@ -34,6 +34,7 @@ SA_FARFIELD_VISCOSITY_RATIO = 0.21043825715555026
 ADAPTATION_BOUNDARY_LAYERS = 30
 ADAPTATION_BOUNDARY_LAYER_INITIAL_SIZE = 1e-5  # metres
 ADAPTATION_BOUNDARY_LAYER_GROWTH_RATE = 1.2
+FLOOR_CLEARANCE_M = 0.0001
 TRANSITION_MODEL_CHOICES = {
     "NO_TRANSITION",
     "GAMMA_2015",
@@ -63,6 +64,11 @@ def _set_vector(target: dict, vector: Tuple[float, float, float]) -> None:
             target.setdefault(axis, {})["value"] = value
 
 
+def _floor_height(bbox_min_z: float, bbox_max_z: float, padding: float) -> float:
+    """Place the floor 0.1 mm below the lowest CAD point, plus user padding."""
+    return min(bbox_min_z, bbox_max_z) - FLOOR_CLEARANCE_M - padding
+
+
 
 
 @dataclass
@@ -86,9 +92,6 @@ class CaseConfig:
     frontal_area_override: Optional[float] = None  # Manual frontal area (m²) - overrides calculation
     rotating_wheels: bool = False
     wheel_surfaces: Optional[Sequence[str]] = None
-    wheel_rotation_rate: float = 110.2
-    front_wheel_center: Tuple[float, float, float] = (0.0, 0.0, 0.28)
-    rear_wheel_center: Tuple[float, float, float] = (-2.679, 0.0, 0.28)
     shellpower_enabled: bool = False
     shellpower_target_area: Optional[float] = None  # None = use Settings default
     shellpower_lat: float = -23.7
@@ -120,6 +123,13 @@ class AutoArrayConfig:
     shellpower_edge_margin: float = 0.035
 
 
+@dataclass(frozen=True)
+class WheelMotionGroup:
+    surfaces: Tuple[str, ...]
+    center: Tuple[float, float, float]
+    radius: float
+
+
 class SimulationTemplateBuilder:
     """Utility to copy and tweak the baseline JSON template."""
 
@@ -143,11 +153,7 @@ class SimulationTemplateBuilder:
         turbulence_model: str = DEFAULT_TURBULENCE_MODEL,
         ground_speed: float = 24.59,
         rotating_wheels: bool = False,
-        front_wheel_surfaces: Optional[Sequence[str]] = None,
-        rear_wheel_surfaces: Optional[Sequence[str]] = None,
-        wheel_rotation_rate: float = 110.2,
-        front_wheel_center: Tuple[float, float, float] = (0.0, 0.0, 0.28),
-        rear_wheel_center: Tuple[float, float, float] = (-2.679, 0.0, 0.28),
+        wheel_groups: Optional[Sequence[WheelMotionGroup]] = None,
     ) -> dict:
         payload = copy.deepcopy(self._base_payload)
         ref_values = payload.setdefault("referenceValues", {})
@@ -172,13 +178,11 @@ class SimulationTemplateBuilder:
         if wall_template is None or farfield_template is None:
             raise ValueError("Base simulation template is missing wall or farfield boundary data.")
 
-        # Prepare wheel surfaces for boundary conditions
-        all_wheel_surfaces: List[str] = []
-        if rotating_wheels:
-            if front_wheel_surfaces:
-                all_wheel_surfaces.extend(front_wheel_surfaces)
-            if rear_wheel_surfaces:
-                all_wheel_surfaces.extend(rear_wheel_surfaces)
+        if rotating_wheels and not wheel_groups:
+            raise ValueError("Rotating wheels requested but no wheel groups were detected.")
+        all_wheel_surfaces = [
+            surface for group in (wheel_groups or ()) for surface in group.surfaces
+        ] if rotating_wheels else []
 
         # Create car body BC, excluding wheel surfaces if wheels are rotating
         car_body_surfaces = list(body_surfaces)
@@ -222,15 +226,8 @@ class SimulationTemplateBuilder:
         self._attach_floor_motion(payload, floor_surfaces, ground_speed)
 
         # Attach wheel motion frames if rotating wheels enabled
-        if rotating_wheels and (front_wheel_surfaces or rear_wheel_surfaces):
-            self._attach_wheel_motion(
-                payload,
-                front_wheel_surfaces=front_wheel_surfaces or [],
-                rear_wheel_surfaces=rear_wheel_surfaces or [],
-                rotation_rate=wheel_rotation_rate,
-                front_center=front_wheel_center,
-                rear_center=rear_wheel_center,
-            )
+        if rotating_wheels:
+            self._attach_wheel_motion(payload, wheel_groups or (), ground_speed)
 
         # Don't normalize physics - let Luminary use the template's original physics ID
         # self._normalize_physics_metadata(payload)
@@ -423,129 +420,53 @@ class SimulationTemplateBuilder:
     def _attach_wheel_motion(
         self,
         payload: dict,
-        front_wheel_surfaces: Sequence[str],
-        rear_wheel_surfaces: Sequence[str],
-        rotation_rate: float,
-        front_center: Tuple[float, float, float],
-        rear_center: Tuple[float, float, float],
+        wheel_groups: Sequence[WheelMotionGroup],
+        ground_speed: float,
     ) -> None:
-        """
-        Attach rotating wheel motion frames.
-
-        Parameters
-        ----------
-        payload : dict
-            Simulation payload to modify
-        front_wheel_surfaces : Sequence[str]
-            Surface names for front wheels
-        rear_wheel_surfaces : Sequence[str]
-            Surface names for rear wheels
-        rotation_rate : float
-            Angular velocity in rad/s (around Y-axis)
-        front_center : Tuple[float, float, float]
-            Front wheel rotation center (x, y, z) in global coordinates
-        rear_center : Tuple[float, float, float]
-            Rear wheel rotation center (x, y, z) in global coordinates
-        """
+        """Attach one rotation frame per axle at its measured X/Z center."""
         current_motion = payload.setdefault("motionData", [])
-
-        # Remove existing wheel frames if present (idempotent)
         filtered_motion = [
             entry for entry in current_motion
             if entry.get("frameId") not in ("front_wheels_frame", "rear_wheels_frame")
+            and not entry.get("frameId", "").startswith("wheel_")
         ]
+        zero_vector = {axis: {"value": 0.0} for axis in "xyz"}
 
-        zero_vector = {
-            "x": {"value": 0.0},
-            "y": {"value": 0.0},
-            "z": {"value": 0.0},
-        }
-
-        # Create front wheels frame if surfaces provided
-        if front_wheel_surfaces:
-            front_angular_velocity = {
+        for index, group in enumerate(wheel_groups, start=1):
+            if group.radius <= 0:
+                raise ValueError(f"Wheel {index} has an invalid radius: {group.radius} m")
+            rotation_rate = ground_speed / group.radius
+            angular_velocity = {
                 "x": {"value": 0.0},
                 "y": {"value": rotation_rate},
                 "z": {"value": 0.0},
             }
-
-            front_wheel_entry = {
-                "frameId": "front_wheels_frame",
-                "frameName": "Front Wheels",
+            frame_name = f"Wheel {index}"
+            wheel_entry = {
+                "frameId": f"wheel_{index}_frame",
+                "frameName": frame_name,
                 "frameParent": "global_frame_id",
-                "attachedBoundaries": list(front_wheel_surfaces),
+                "attachedBoundaries": list(group.surfaces),
                 "motionType": "CONSTANT_ANGULAR_MOTION",
                 "motionSpecification": "MOTION_SPECIFICATION_NORMAL",
                 "motionFormulation": "MRF_MOTION_FORMULATION",
                 "motionTranslation": copy.deepcopy(zero_vector),
                 "motionTranslationVelocity": copy.deepcopy(zero_vector),
-                "motionAngularVelocity": front_angular_velocity,
+                "motionAngularVelocity": angular_velocity,
                 "motionRotationAngles": copy.deepcopy(zero_vector),
                 "frameTransforms": [
                     {
-                        "transformName": "Front Wheels-origin",
+                        "transformName": f"{frame_name}-origin",
                         "transformType": "TRANSLATIONAL_TRANSFORM",
                         "transformRotationAngles": copy.deepcopy(zero_vector),
                         "transformTranslation": {
-                            "x": {"value": front_center[0], "quantityType": "LENGTH"},
-                            "y": {"value": front_center[1], "quantityType": "LENGTH"},
-                            "z": {"value": front_center[2], "quantityType": "LENGTH"},
+                            axis: {"value": value, "quantityType": "LENGTH"}
+                            for axis, value in zip("xyz", group.center)
                         },
                     }
                 ],
-                # Provide snake_case aliases for backward compatibility
-                "motion_type": "CONSTANT_ANGULAR_MOTION",
-                "motion_specification": "MOTION_SPECIFICATION_NORMAL",
-                "motion_formulation": "MRF_MOTION_FORMULATION",
-                "motion_translation": copy.deepcopy(zero_vector),
-                "motion_translation_velocity": copy.deepcopy(zero_vector),
-                "motion_angular_velocity": front_angular_velocity,
-                "motion_rotation_angles": copy.deepcopy(zero_vector),
             }
-            filtered_motion.append(front_wheel_entry)
-
-        # Create rear wheels frame if surfaces provided
-        if rear_wheel_surfaces:
-            rear_angular_velocity = {
-                "x": {"value": 0.0},
-                "y": {"value": rotation_rate},
-                "z": {"value": 0.0},
-            }
-
-            rear_wheel_entry = {
-                "frameId": "rear_wheels_frame",
-                "frameName": "Rear Wheels",
-                "frameParent": "global_frame_id",
-                "attachedBoundaries": list(rear_wheel_surfaces),
-                "motionType": "CONSTANT_ANGULAR_MOTION",
-                "motionSpecification": "MOTION_SPECIFICATION_NORMAL",
-                "motionFormulation": "MRF_MOTION_FORMULATION",
-                "motionTranslation": copy.deepcopy(zero_vector),
-                "motionTranslationVelocity": copy.deepcopy(zero_vector),
-                "motionAngularVelocity": rear_angular_velocity,
-                "motionRotationAngles": copy.deepcopy(zero_vector),
-                "frameTransforms": [
-                    {
-                        "transformName": "Rear Wheels-origin",
-                        "transformType": "TRANSLATIONAL_TRANSFORM",
-                        "transformRotationAngles": copy.deepcopy(zero_vector),
-                        "transformTranslation": {
-                            "x": {"value": rear_center[0], "quantityType": "LENGTH"},
-                            "y": {"value": rear_center[1], "quantityType": "LENGTH"},
-                            "z": {"value": rear_center[2], "quantityType": "LENGTH"},
-                        },
-                    }
-                ],
-                # Provide snake_case aliases for backward compatibility
-                "motion_type": "CONSTANT_ANGULAR_MOTION",
-                "motion_specification": "MOTION_SPECIFICATION_NORMAL",
-                "motion_formulation": "MRF_MOTION_FORMULATION",
-                "motion_translation": copy.deepcopy(zero_vector),
-                "motion_translation_velocity": copy.deepcopy(zero_vector),
-                "motion_angular_velocity": rear_angular_velocity,
-                "motion_rotation_angles": copy.deepcopy(zero_vector),
-            }
-            filtered_motion.append(rear_wheel_entry)
+            filtered_motion.append(wheel_entry)
 
         payload["motionData"] = filtered_motion
 
@@ -1098,7 +1019,7 @@ class LuminaryCFDPipeline:
         front = max(dims[1] * 30, dims[1] + 0.1)
         back = min(dims[1] * -60, - dims[1] -0.1)
         padding = config.farfield_padding
-        floor_z = min(bbox_min[2], bbox_max[2]) - 0.01 - padding
+        floor_z = _floor_height(bbox_min[2], bbox_max[2], padding)
         z_height = max(dims[2] * config.farfield_multiplier, dims[2] + 0.05)
         z_max = floor_z + z_height + padding
         min_corner = (
@@ -1216,8 +1137,7 @@ class LuminaryCFDPipeline:
             )
 
         # Detect wheel surfaces if rotating wheels enabled
-        front_wheel_surfaces: List[str] = []
-        rear_wheel_surfaces: List[str] = []
+        wheel_groups: List[WheelMotionGroup] = []
         wheel_surfaces_for_area: List[str] = []
 
         if config.rotating_wheels:
@@ -1229,25 +1149,31 @@ class LuminaryCFDPipeline:
                     surface_map,
                     floor_z,
                     exclude=floor_surfaces + farfield_surfaces,
-                    z_min=0.0,
-                    z_max=0.065,
+                    z_min=bbox_min[2],
+                    z_max=bbox_min[2] + 0.065,
                 )
             )
 
-            if wheel_surfaces:
-                callback(f"Detected {len(wheel_surfaces)} wheel surfaces: {wheel_surfaces}")
-                front_wheel_surfaces, rear_wheel_surfaces = self._categorize_wheels_by_x(
-                    surface_map, wheel_surfaces
+            if not wheel_surfaces:
+                raise RuntimeError(
+                    "Rotating wheels requested but no wheel surfaces were detected. "
+                    "Specify wheel surfaces explicitly or check the input geometry."
                 )
-                callback(f"Front wheels: {front_wheel_surfaces}, Rear: {rear_wheel_surfaces}")
-                wheel_surfaces_for_area = front_wheel_surfaces + rear_wheel_surfaces
-            else:
-                callback("Warning: No wheel surfaces detected")
+            wheel_groups = self._infer_wheel_motion_groups(surface_map, wheel_surfaces)
+            wheel_surfaces_for_area = [
+                name for group in wheel_groups for name in group.surfaces
+            ]
+            for index, group in enumerate(wheel_groups, start=1):
+                callback(
+                    f"Wheel {index}: center={group.center} m, radius={group.radius:.4f} m, "
+                    f"rotation={config.ground_speed / group.radius:.2f} rad/s, "
+                    f"surfaces={list(group.surfaces)}"
+                )
 
         # Exclude wheels from body surfaces if rotating wheels enabled
         remaining_exclude = farfield_surfaces + floor_surfaces
-        if config.rotating_wheels and (front_wheel_surfaces or rear_wheel_surfaces):
-            remaining_exclude = remaining_exclude + front_wheel_surfaces + rear_wheel_surfaces
+        if config.rotating_wheels:
+            remaining_exclude = remaining_exclude + wheel_surfaces_for_area
 
         body_surfaces = list(
             config.body_surfaces
@@ -1297,11 +1223,7 @@ class LuminaryCFDPipeline:
             turbulence_model=config.turbulence_model,
             ground_speed=config.ground_speed,
             rotating_wheels=config.rotating_wheels,
-            front_wheel_surfaces=front_wheel_surfaces,
-            rear_wheel_surfaces=rear_wheel_surfaces,
-            wheel_rotation_rate=config.wheel_rotation_rate,
-            front_wheel_center=config.front_wheel_center,
-            rear_wheel_center=config.rear_wheel_center,
+            wheel_groups=wheel_groups,
         )
         tmp_params = self._template_builder.dump_payload(payload, label=case_name)
         try:
@@ -1670,7 +1592,7 @@ class LuminaryCFDPipeline:
         surface_map : Dict[str, Any]
             Mapping of surface names to boundary metadata
         floor_z : float
-            Z-coordinate of the floor (typically -0.01m)
+            Z-coordinate of the floor (0.1 mm below the car by default)
         exclude : Optional[Sequence[str]]
             Surface names to exclude (e.g., floor, farfield)
         z_min : float
@@ -1714,61 +1636,68 @@ class LuminaryCFDPipeline:
         return sorted(candidates)
 
     @staticmethod
-    def _categorize_wheels_by_x(
+    def _infer_wheel_motion_groups(
         surface_map: Dict[str, Any],
         wheel_surfaces: Sequence[str],
-        x_threshold: float = -1.0,
-    ) -> Tuple[List[str], List[str]]:
-        """
-        Categorize wheel surfaces into front and rear based on X-coordinate threshold.
-
-        Surfaces with X < x_threshold are rear wheels, otherwise front wheels.
-
-        Parameters
-        ----------
-        surface_map : Dict[str, Any]
-            Mapping of surface names to boundary metadata
-        wheel_surfaces : Sequence[str]
-            List of wheel surface names to categorize
-        x_threshold : float
-            X-coordinate threshold for front/rear split (default: -1.0m)
-            Surfaces with X < threshold are rear wheels
-
-        Returns
-        -------
-        Tuple[List[str], List[str]]
-            Tuple of (front_wheels, rear_wheels) surface name lists
-        """
-        if not wheel_surfaces:
-            return [], []
-
-        front_wheels: List[str] = []
-        rear_wheels: List[str] = []
-
-        for name in wheel_surfaces:
-            boundary = surface_map.get(name)
-            if not boundary:
-                continue
-
-            stats = getattr(boundary, "stats", None)
-            if not stats:
-                continue
-
+    ) -> List[WheelMotionGroup]:
+        """Group wheel surfaces by axle and measure each axle's rotation axis."""
+        bounds = []
+        for name in dict.fromkeys(wheel_surfaces):
+            stats = getattr(surface_map.get(name), "stats", None)
             min_coord = getattr(stats, "min_coord", None)
             max_coord = getattr(stats, "max_coord", None)
-            if not min_coord or not max_coord:
-                continue
+            if min_coord is None or max_coord is None:
+                raise ValueError(f"No mesh bounds for wheel surface {name!r}.")
+            mins = tuple(getattr(min_coord, axis) for axis in "xyz")
+            maxs = tuple(getattr(max_coord, axis) for axis in "xyz")
+            if not all(math.isfinite(v) for v in mins + maxs) or any(
+                low > high for low, high in zip(mins, maxs)
+            ):
+                raise ValueError(f"Invalid mesh bounds for wheel surface {name!r}.")
+            bounds.append((name, mins, maxs))
 
-            # Calculate centroid X coordinate
-            centroid_x = (getattr(min_coord, "x", 0) + getattr(max_coord, "x", 0)) / 2
+        if not bounds:
+            raise ValueError("No wheel surfaces were provided.")
+        diameter = max(high[2] - low[2] for _, low, high in bounds)
+        if diameter < 0.05:
+            raise ValueError("Detected wheel surfaces have no measurable diameter.")
 
-            # Categorize based on threshold
-            if centroid_x < x_threshold:
-                rear_wheels.append(name)
-            else:
-                front_wheels.append(name)
+        def cluster_axles(items: list, gap_limit: float) -> list[list]:
+            ordered = sorted(items, key=lambda item: (item[1][0] + item[2][0]) / 2)
+            groups = [[ordered[0]]]
+            previous_center = (ordered[0][1][0] + ordered[0][2][0]) / 2
+            for item in ordered[1:]:
+                center = (item[1][0] + item[2][0]) / 2
+                if center - previous_center > gap_limit:
+                    groups.append([])
+                groups[-1].append(item)
+                previous_center = center
+            return groups
 
-        return front_wheels, rear_wheels
+        wheel_groups = []
+        for axle in cluster_axles(bounds, diameter):
+            min_x = min(item[1][0] for item in axle)
+            max_x = max(item[2][0] for item in axle)
+            min_z = min(item[1][2] for item in axle)
+            max_z = max(item[2][2] for item in axle)
+            diameter_x = max_x - min_x
+            diameter_z = max_z - min_z
+            if min(diameter_x, diameter_z) < 0.05 or abs(diameter_x - diameter_z) > max(
+                0.02, 0.2 * max(diameter_x, diameter_z)
+            ):
+                raise ValueError(
+                    "Detected wheel bounds are not approximately circular: "
+                    f"{[item[0] for item in axle]} (X={diameter_x:.3f} m, "
+                    f"Z={diameter_z:.3f} m). Specify wheel surfaces explicitly."
+                )
+            wheel_groups.append(WheelMotionGroup(
+                surfaces=tuple(sorted(item[0] for item in axle)),
+                # A rotation about Y has the same surface velocity at any
+                # origin along that axis, so both front wheels can share one frame.
+                center=((min_x + max_x) / 2, 0.0, (min_z + max_z) / 2),
+                radius=(diameter_x + diameter_z) / 4,
+            ))
+        return sorted(wheel_groups, key=lambda group: (-group.center[0], group.center[1]))
 
     @staticmethod
     def _geometry_bounds(

@@ -209,11 +209,11 @@
           <input id="rotating_wheels" name="rotating_wheels" type="checkbox" style="width:auto; margin-right: 0.5rem;" />
           Rotating Wheels
         </label>
-        <small>Enable rotating wheel motion frames (110.2 rad/s around Y-axis)</small>
+        <small>Match wheel rotation to moving floor speed using the detected wheel radius</small>
       </div>
       <div class="full" id="wheel_surfaces_container" style="display: none;">
         <label for="wheel_surfaces">Wheel surface names (comma separated, optional)</label>
-        <input id="wheel_surfaces" name="wheel_surfaces" placeholder="Auto-detect surfaces touching z=0 to z=0.065m" />
+        <input id="wheel_surfaces" name="wheel_surfaces" placeholder="Auto-detect surfaces near the lowest point of the car" />
         <small>Override auto-detection. Surfaces split into front/back by X-coordinate.</small>
       </div>
       <div class="full">

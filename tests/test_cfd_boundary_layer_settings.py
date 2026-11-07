@@ -4,7 +4,7 @@ import pytest
 from google.protobuf.json_format import ParseDict
 from luminarycloud._proto.client.simulation_pb2 import AdaptiveMeshRefinement
 
-from app.luminary_pipeline import SimulationTemplateBuilder
+from app.luminary_pipeline import SimulationTemplateBuilder, WheelMotionGroup
 
 
 @pytest.mark.parametrize("production", [False, True])
@@ -26,8 +26,10 @@ def test_manual_adaptation_boundary_layer_uses_only_walls(monkeypatch, productio
         sound_speed=340.29,
         frontal_area=1.0,
         rotating_wheels=rotating_wheels,
-        front_wheel_surfaces=["Wheel_FL", "Wheel_FR"] if rotating_wheels else None,
-        rear_wheel_surfaces=["Wheel_Rear"] if rotating_wheels else None,
+        wheel_groups=[
+            WheelMotionGroup(("Wheel_FL", "Wheel_FR"), (0.0, 0.0, 0.28), 0.28),
+            WheelMotionGroup(("Wheel_Rear",), (-2.7, 0.0, 0.28), 0.28),
+        ] if rotating_wheels else None,
     )
 
     amr = payload["adaptiveMeshRefinement"]
