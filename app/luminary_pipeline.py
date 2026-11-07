@@ -34,7 +34,7 @@ SA_FARFIELD_VISCOSITY_RATIO = 0.21043825715555026
 ADAPTATION_BOUNDARY_LAYERS = 30
 ADAPTATION_BOUNDARY_LAYER_INITIAL_SIZE = 1e-5  # metres
 ADAPTATION_BOUNDARY_LAYER_GROWTH_RATE = 1.2
-FLOOR_CLEARANCE_M = 0.0001
+FLOOR_CLEARANCE_M = 0.001
 TRANSITION_MODEL_CHOICES = {
     "NO_TRANSITION",
     "GAMMA_2015",
@@ -65,7 +65,7 @@ def _set_vector(target: dict, vector: Tuple[float, float, float]) -> None:
 
 
 def _floor_height(bbox_min_z: float, bbox_max_z: float, padding: float) -> float:
-    """Place the floor 0.1 mm below the lowest CAD point, plus user padding."""
+    """Place the floor 1 mm below the lowest CAD point, plus user padding."""
     return min(bbox_min_z, bbox_max_z) - FLOOR_CLEARANCE_M - padding
 
 
@@ -1592,7 +1592,7 @@ class LuminaryCFDPipeline:
         surface_map : Dict[str, Any]
             Mapping of surface names to boundary metadata
         floor_z : float
-            Z-coordinate of the floor (0.1 mm below the car by default)
+            Z-coordinate of the floor (1 mm below the car by default)
         exclude : Optional[Sequence[str]]
             Surface names to exclude (e.g., floor, farfield)
         z_min : float

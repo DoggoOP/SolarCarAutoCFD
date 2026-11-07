@@ -59,6 +59,6 @@ def test_wheel_axes_and_rolling_speed_match_mesh_and_floor(rear_x, rear_radius):
         assert (origin.x.value, origin.y.value, origin.z.value) == pytest.approx(group.center)
 
 
-def test_floor_height_has_point_one_millimeter_default_clearance():
-    assert _floor_height(0.0, 1.155, 0.0) == pytest.approx(-0.0001)
-    assert _floor_height(0.2, 1.355, 0.0) == pytest.approx(0.1999)
+def test_floor_height_has_one_millimeter_default_clearance():
+    assert _floor_height(0.0, 1.155, 0.0) == pytest.approx(-0.001)
+    assert _floor_height(0.2, 1.355, 0.0) == pytest.approx(0.199)
