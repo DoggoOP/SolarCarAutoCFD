@@ -36,6 +36,11 @@ ADAPTATION_BOUNDARY_LAYERS = 30
 ADAPTATION_BOUNDARY_LAYER_INITIAL_SIZE = 1e-5  # metres
 ADAPTATION_BOUNDARY_LAYER_GROWTH_RATE = 1.2
 FLOOR_CLEARANCE_M = 0.001
+MAX_CFD_ITERATIONS = 12500
+DRAG_SETTLING_THRESHOLD_PERCENT = 0.5
+DRAG_SETTLING_START_ITERATION = 8000
+DRAG_SETTLING_AVERAGING_ITERATIONS = 250
+DRAG_SETTLING_WINDOW_ITERATIONS = 1000
 TRANSITION_MODEL_CHOICES = {
     "NO_TRANSITION",
     "GAMMA_2015",
@@ -869,25 +874,25 @@ class LuminaryCFDPipeline:
         physics_id: str,
         force_surfaces: Sequence[str],
         callback: StatusCallback,
-    ) -> int:
+    ) -> Tuple[int, bool]:
         """
-        Configure convergence criteria and force outputs via API after template creation.
+        Stop when drag settles, or at the iteration limit.
 
         Returns
         -------
-        int
-            Maximum number of iterations configured
+        tuple[int, bool]
+            Maximum iterations and whether the area output was created.
         """
         callback("Setting up stopping conditions and force outputs...")
 
         # Set general stopping conditions
-        max_iterations = 12500
+        max_iterations = MAX_CFD_ITERATIONS
         template.update_general_stopping_conditions(
             max_iterations=max_iterations,
-            stop_on_any=True,
+            stop_on_any=False,
         )
 
-        # Define residual output definitions to monitor
+        # Keep residual outputs for diagnostics, but never use them to stop the run.
         residual_quantities = [
             (QuantityType.RESIDUAL_DENSITY, "Continuity Residual"),
             (QuantityType.RESIDUAL_X_MOMENTUM, "X-Momentum Residual"),
@@ -898,28 +903,18 @@ class LuminaryCFDPipeline:
             (QuantityType.RESIDUAL_OMEGA, "Omega Residual"),
         ]
 
-        threshold = 0.0001  # Convergence threshold for residuals
-
         for quantity, name in residual_quantities:
             try:
-                # Create residual output definition
                 output_def = ResidualOutputDefinition(
                     name=name,
                     include={quantity: True},
                     residual_type=ResidualType.RELATIVE,
                     physics_id=physics_id,
                 )
-                created_def = template.create_output_definition(output_def)
-
-                # Create stopping condition on this output
-                template.create_or_update_stopping_condition(
-                    output_definition_id=created_def.id,
-                    threshold=threshold,
-                )
-                callback(f"  Created stopping condition for {name}")
+                template.create_output_definition(output_def)
+                callback(f"  Created residual monitor for {name}")
             except Exception as exc:
-                callback(f"  Warning: Could not create stopping condition for {name}: {exc}")
-                # Continue with other residuals even if one fails
+                callback(f"  Warning: Could not create residual monitor for {name}: {exc}")
 
         # Create force output definitions
         # Use force_direction to specify exact direction in global coordinates:
@@ -938,6 +933,7 @@ class LuminaryCFDPipeline:
             ("Lift (Fz)", QuantityType.TOTAL_FORCE, Vector3(0, 0, 1)),
         ]
 
+        drag_output_id: Optional[str] = None
         for name, quantity, direction in force_outputs:
             try:
                 force_def = ForceOutputDefinition(
@@ -950,9 +946,35 @@ class LuminaryCFDPipeline:
                 )
                 created_def = template.create_output_definition(force_def)
                 callback(f"  ✓ Created force output: {name} (ID: {created_def.id})")
+                if name == "Drag (Fx)":
+                    drag_output_id = created_def.id
             except Exception as exc:
+                if name == "Drag (Fx)":
+                    raise RuntimeError(f"Could not create the drag convergence output: {exc}") from exc
                 callback(f"  ✗ ERROR creating force output for {name}: {exc}")
-                # Continue even if one fails
+
+        if not drag_output_id:
+            raise RuntimeError("Drag convergence output was not created")
+        try:
+            template.create_or_update_stopping_condition(
+                output_definition_id=drag_output_id,
+                threshold=DRAG_SETTLING_THRESHOLD_PERCENT,
+                start_at_iteration=DRAG_SETTLING_START_ITERATION,
+                averaging_iterations=DRAG_SETTLING_AVERAGING_ITERATIONS,
+                iterations_to_consider=DRAG_SETTLING_WINDOW_ITERATIONS,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Could not configure drag convergence: {exc}") from exc
+        configured_conditions = template.list_stopping_conditions()
+        if len(configured_conditions) != 1 or configured_conditions[0].output_definition_id != drag_output_id:
+            raise RuntimeError("Expected exactly one stopping condition on Drag (Fx)")
+        callback(
+            f"  Drag convergence: {DRAG_SETTLING_THRESHOLD_PERCENT}% over "
+            f"{DRAG_SETTLING_WINDOW_ITERATIONS} iterations of "
+            f"{DRAG_SETTLING_AVERAGING_ITERATIONS}-iteration moving averages, "
+            f"starting at iteration {DRAG_SETTLING_START_ITERATION}; "
+            f"maximum {max_iterations} iterations"
+        )
 
         # Create area output for wetted area calculation
         # Note: Unlike TOTAL_FORCE/TOTAL_MOMENT, AREA requires an output definition to be created
@@ -973,6 +995,33 @@ class LuminaryCFDPipeline:
             # Don't fail - we can still get force results
 
         return max_iterations, area_output_created
+
+    @staticmethod
+    def _get_convergence_result(
+        simulation: lc.Simulation,
+        callback: StatusCallback,
+    ) -> Tuple[str, Optional[int]]:
+        """Distinguish drag convergence from the hard iteration limit."""
+        try:
+            conditions = simulation.get_stopping_condition_status().condition_results
+        except Exception as exc:
+            callback(f"Warning: Could not verify drag convergence: {exc}")
+            return "UNKNOWN", None
+
+        drag = next((c for c in conditions if c.output_name == "Drag (Fx)"), None)
+        limit = next((c for c in conditions if c.output_name == "Iteration Index"), None)
+        actual_iterations = int(round(limit.value)) if limit else None
+        if drag and drag.satisfied:
+            callback(
+                f"Drag settled after {actual_iterations} iterations "
+                f"({DRAG_SETTLING_THRESHOLD_PERCENT}% threshold)."
+            )
+            return "DRAG_SETTLED", actual_iterations
+        if limit and limit.satisfied:
+            callback(f"Reached {actual_iterations} iterations before drag settled; review this result.")
+            return "ITERATION_LIMIT", actual_iterations
+        callback("Warning: Run completed without a verified drag settling or iteration-limit condition.")
+        return "UNKNOWN", actual_iterations
 
     def run_case(
         self,
@@ -1332,6 +1381,10 @@ class LuminaryCFDPipeline:
                     f"View in Luminary Cloud: https://app.luminarycloud.com/project/{project.id}/simulation/{simulation.id}"
                 )
 
+        convergence_status, actual_iterations = self._get_convergence_result(
+            simulation, callback
+        )
+
         # Fetch force results
         callback("Fetching force results...")
         force_results = self._fetch_force_results(
@@ -1417,7 +1470,10 @@ class LuminaryCFDPipeline:
             try:
                 callback("Logging results to Google Sheets...")
                 convergence_info = {
-                    "status": status.name,
+                    "status": (
+                        f"{convergence_status} ({actual_iterations} iterations)"
+                        if actual_iterations is not None else convergence_status
+                    ),
                     "iterations": max_iterations,
                 }
                 self._sheets_logger.append_result(
@@ -1447,6 +1503,8 @@ class LuminaryCFDPipeline:
             "simulation_id": simulation.id,
             "template_id": template.id,
             "status": status.name,
+            "convergence_status": convergence_status,
+            "actual_iterations": actual_iterations,
             "transition_model": config.transition_model,
             "turbulence_model": config.turbulence_model,
             "frontal_area_m2": frontal_area,
