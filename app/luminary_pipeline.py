@@ -22,6 +22,7 @@ from luminarycloud.pipelines import api as pipelines_api
 from luminarycloud.types import Vector3
 
 from .config import Settings
+from .frontal_area import projected_frontal_area
 from .sheets_logger import SheetsLogger
 
 StatusCallback = Callable[[str], None]
@@ -1002,13 +1003,23 @@ class LuminaryCFDPipeline:
         dims = tuple(max(bmax - bmin, 1e-4) for bmin, bmax in zip(bbox_min, bbox_max))
         center = tuple((bmin + bmax) / 2 for bmin, bmax in zip(bbox_min, bbox_max))
 
-        # Use manual frontal area if provided (will be calculated from mesh later if not provided)
+        # Project the uploaded car before adding the farfield or generating the CFD mesh.
         if config.frontal_area_override:
             frontal_area = config.frontal_area_override
+            frontal_area_source = "manual"
             callback(f"Using manual frontal area: {frontal_area:.4f} m²")
         else:
-            # Will be computed from mesh projection after meshing
-            frontal_area = None
+            callback("Computing frontal silhouette from uploaded CAD...")
+            try:
+                frontal_area = projected_frontal_area(config.cad_path, bbox_min, bbox_max)
+            except Exception as exc:
+                raise RuntimeError(
+                    "Could not compute the projected frontal area from the uploaded CAD. "
+                    "Check the geometry or enter a manual frontal area. "
+                    f"Cause: {exc}"
+                ) from exc
+            callback(f"✓ CAD frontal silhouette area: {frontal_area:.4f} m²")
+            frontal_area_source = "cad_silhouette"
         if config.farfield_center_override:
             center = (
                 config.farfield_center_override[0],
@@ -1083,18 +1094,6 @@ class LuminaryCFDPipeline:
         surface_map = self._collect_surface_metadata(metadata)
         surface_names = sorted(surface_map.keys())
         callback(f"Detected surfaces: {', '.join(surface_names) or 'none'}")
-
-        # Calculate frontal area if not manually provided
-        if frontal_area is None:  # Not set yet (no manual override)
-            callback("Computing actual frontal area from mesh geometry...")
-            frontal_area_computed = self._compute_projected_area_from_mesh(mesh, axis='x')
-            if frontal_area_computed > 0:
-                frontal_area = frontal_area_computed
-                callback(f"✓ Computed frontal area from mesh projection: {frontal_area:.4f} m²")
-            else:
-                # Fallback to bounding box
-                frontal_area = self._calculate_frontal_area(bbox_min, bbox_max)
-                callback(f"⚠ Using bounding box frontal area (mesh projection unavailable): {frontal_area:.4f} m²")
 
         floor_surfaces = list(
             config.floor_surfaces
@@ -1450,6 +1449,8 @@ class LuminaryCFDPipeline:
             "status": status.name,
             "transition_model": config.transition_model,
             "turbulence_model": config.turbulence_model,
+            "frontal_area_m2": frontal_area,
+            "frontal_area_source": frontal_area_source,
             "force_results": force_results,
             "shellpower_data": shellpower_data,
         }
@@ -1731,110 +1732,6 @@ class LuminaryCFDPipeline:
         if any(math.isinf(val) for val in min_vals + max_vals):
             raise RuntimeError("Unable to extract bounding box information from the geometry tags.")
         return tuple(min_vals), tuple(max_vals)
-
-    @staticmethod
-    def _calculate_frontal_area(
-        bbox_min: Tuple[float, float, float],
-        bbox_max: Tuple[float, float, float],
-    ) -> float:
-        """Calculate frontal area as YZ plane projection (assuming X is forward direction)."""
-        # Frontal area = height (Z) × width (Y)
-        height = abs(bbox_max[2] - bbox_min[2])
-        width = abs(bbox_max[1] - bbox_min[1])
-        frontal_area = height * width
-        return max(frontal_area, 0.01)  # Ensure minimum area to avoid division by zero
-
-    @staticmethod
-    def _compute_projected_area_from_mesh(mesh: lc.Mesh, axis: str = 'x') -> float:
-        """
-        Compute projected area of mesh onto a plane perpendicular to the given axis.
-
-        Parameters
-        ----------
-        mesh : lc.Mesh
-            Luminary mesh object
-        axis : str
-            Projection axis ('x', 'y', or 'z'). Default 'x' projects onto YZ plane (frontal area).
-
-        Returns
-        -------
-        float
-            Projected area in m², or 0 if computation fails
-        """
-        try:
-            import numpy as np
-            import tempfile
-            import os
-
-            # Download mesh data
-            with mesh.download() as download:
-                # Save to temporary file
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.vtu') as tmp:
-                    tmp.write(download.read())
-                    tmp_path = tmp.name
-
-                try:
-                    # Try meshio first (simpler, more reliable)
-                    try:
-                        import meshio
-
-                        mesh_data = meshio.read(tmp_path)
-                        points = mesh_data.points
-
-                        # Get all surface triangles
-                        triangles = []
-                        for cell_block in mesh_data.cells:
-                            if cell_block.type == "triangle":
-                                triangles.extend(cell_block.data)
-
-                        if not triangles:
-                            return 0.0
-
-                        # Calculate projected area
-                        total_area = 0.0
-                        for tri in triangles:
-                            p0 = points[tri[0]]
-                            p1 = points[tri[1]]
-                            p2 = points[tri[2]]
-
-                            # Project triangle onto plane perpendicular to axis
-                            if axis.lower() == 'x':
-                                # Project onto YZ plane (frontal area)
-                                p0_proj = np.array([p0[1], p0[2]])
-                                p1_proj = np.array([p1[1], p1[2]])
-                                p2_proj = np.array([p2[1], p2[2]])
-                            elif axis.lower() == 'y':
-                                # Project onto XZ plane (side area)
-                                p0_proj = np.array([p0[0], p0[2]])
-                                p1_proj = np.array([p1[0], p1[2]])
-                                p2_proj = np.array([p2[0], p2[2]])
-                            else:  # 'z'
-                                # Project onto XY plane (plan area)
-                                p0_proj = np.array([p0[0], p0[1]])
-                                p1_proj = np.array([p1[0], p1[1]])
-                                p2_proj = np.array([p2[0], p2[1]])
-
-                            # Calculate area of projected triangle using cross product
-                            v1 = p1_proj - p0_proj
-                            v2 = p2_proj - p0_proj
-                            # 2D cross product magnitude = |v1_x * v2_y - v1_y * v2_x|
-                            area = 0.5 * abs(v1[0] * v2[1] - v1[1] * v2[0])
-                            total_area += area
-
-                        return total_area
-
-                    except ImportError:
-                        # meshio not available, return 0
-                        return 0.0
-
-                finally:
-                    # Clean up temp file
-                    if os.path.exists(tmp_path):
-                        os.unlink(tmp_path)
-
-        except Exception as e:
-            # If anything fails, return 0 to trigger fallback
-            return 0.0
 
     @staticmethod
     def _generate_array_map(layout: List[dict]) -> Optional[str]:
