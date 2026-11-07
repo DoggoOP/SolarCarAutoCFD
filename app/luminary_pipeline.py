@@ -76,7 +76,7 @@ class CaseConfig:
     mesh_max_size: float
     transition_model: str = DEFAULT_TRANSITION_MODEL
     turbulence_model: str = DEFAULT_TURBULENCE_MODEL
-    farfield_multiplier: float = 20.0
+    farfield_multiplier: float = 10.0
     farfield_padding: float = 0.0
     farfield_center_override: Optional[Tuple[float, float, float]] = None
     body_surfaces: Optional[Sequence[str]] = None

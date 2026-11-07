@@ -174,7 +174,7 @@ async def run_case(
     project_name: str = Form(settings.luminary_project_name),
     farfield_speed: float = Form(settings.default_farfield_speed),
     ground_speed: float = Form(settings.default_farfield_speed),
-    farfield_multiplier: float = Form(25.0),
+    farfield_multiplier: float = Form(10.0),
     farfield_padding: str = Form(""),
     farfield_center: str = Form(""),
     wind_direction: str = Form("1,0,0"),
