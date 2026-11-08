@@ -92,6 +92,7 @@ class SheetsLogger:
         "Solar Array Map (Symmetric)",
         # Link
         "Luminary Link",
+        "Mesh Strategy",
     ]
 
     def _connect(self) -> None:
@@ -179,6 +180,8 @@ class SheetsLogger:
         except Exception:
             pass
 
+        if self._sheet.col_count < len(self.HEADERS):
+            self._sheet.resize(cols=len(self.HEADERS))
         last_col_a1 = rowcol_to_a1(1, len(self.HEADERS))
         header_range = f"A1:{last_col_a1}"
         self._sheet.update(header_range, [self.HEADERS])
@@ -313,6 +316,7 @@ class SheetsLogger:
             self._make_array_map_formula(symmetric_variant, simulation_id, "sym"),
             # Link
             luminary_link,
+            (model_settings or {}).get("mesh_mode", "N/A"),
         ]
 
         # Append the row

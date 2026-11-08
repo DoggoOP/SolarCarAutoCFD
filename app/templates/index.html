@@ -192,11 +192,19 @@
         <input id="farfield_center" name="farfield_center" placeholder="auto" />
       </div>
       <div>
-        <label for="mesh_min_size">Mesh min size (m)</label>
+        <label for="mesh_mode">Mesh strategy</label>
+        <select id="mesh_mode" name="mesh_mode">
+          <option value="LUMI_ADAPTATION" selected>Lumi Mesh Adaptation (15,000 iterations)</option>
+          <option value="FIXED_MANUAL">Fixed mesh with car/wake refinement (5,000 iterations)</option>
+        </select>
+        <small>Both target 10 million cells. Drag settling is checked after 8,000 iterations with adaptation or 1,000 with a fixed mesh.</small>
+      </div>
+      <div>
+        <label for="mesh_min_size">Mesh min size (m; fixed mesh)</label>
         <input id="mesh_min_size" name="mesh_min_size" type="number" step="0.0001" value="0.002" />
       </div>
       <div>
-        <label for="mesh_max_size">Mesh max size (m)</label>
+        <label for="mesh_max_size">Near-car refinement size (m; fixed mesh)</label>
         <input id="mesh_max_size" name="mesh_max_size" type="number" step="0.0001" value="0.05" />
       </div>
       <div>
@@ -301,6 +309,9 @@
             turbulence {{ job.result.turbulence_model or "N/A" }},
             transition {{ job.result.transition_model or "N/A" }}
           </p>
+          {% endif %}
+          {% if job.result.mesh_mode %}
+          <p style="font-size:0.85rem;color:#64748b;">Mesh: {{ "Lumi Mesh Adaptation" if job.result.mesh_mode == "LUMI_ADAPTATION" else "Fixed refined mesh" }}</p>
           {% endif %}
           {% endif %}
           {% if job.error %}
@@ -416,6 +427,7 @@
                      ${(job.result.transition_model || job.result.turbulence_model) ? `<p style="font-size:0.85rem;color:#64748b;">
                        CFD models: turbulence ${job.result.turbulence_model || 'N/A'}, transition ${job.result.transition_model || 'N/A'}
                      </p>` : ''}
+                     ${job.result.mesh_mode ? `<p style="font-size:0.85rem;color:#64748b;">Mesh: ${job.result.mesh_mode === 'LUMI_ADAPTATION' ? 'Lumi Mesh Adaptation' : 'Fixed refined mesh'}</p>` : ''}
                      ${sheetsUrl ? `<p>
                        <a href="${sheetsUrl}"
                           target="_blank"

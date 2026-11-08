@@ -4,16 +4,14 @@ import pytest
 from google.protobuf.json_format import ParseDict
 from luminarycloud._proto.client.simulation_pb2 import AdaptiveMeshRefinement
 
-from app.luminary_pipeline import SimulationTemplateBuilder, WheelMotionGroup
+from app.luminary_pipeline import (
+    MESH_MODE_ADAPTIVE, MESH_MODE_FIXED, SimulationTemplateBuilder, WheelMotionGroup,
+)
 
 
-@pytest.mark.parametrize("production", [False, True])
+@pytest.mark.parametrize("mesh_mode", [MESH_MODE_ADAPTIVE, MESH_MODE_FIXED])
 @pytest.mark.parametrize("rotating_wheels", [False, True])
-def test_manual_adaptation_boundary_layer_uses_only_walls(monkeypatch, production, rotating_wheels):
-    if production:
-        monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production")
-    else:
-        monkeypatch.delenv("RAILWAY_ENVIRONMENT", raising=False)
+def test_manual_adaptation_boundary_layer_uses_only_walls(mesh_mode, rotating_wheels):
 
     template = Path(__file__).resolve().parents[1] / "data/base_simulation_params.json"
     builder = SimulationTemplateBuilder(template)
@@ -30,13 +28,17 @@ def test_manual_adaptation_boundary_layer_uses_only_walls(monkeypatch, productio
             WheelMotionGroup(("Wheel_FL", "Wheel_FR"), (0.0, 0.0, 0.28), 0.28),
             WheelMotionGroup(("Wheel_Rear",), (-2.7, 0.0, 0.28), 0.28),
         ] if rotating_wheels else None,
+        mesh_mode=mesh_mode,
     )
 
     amr = payload["adaptiveMeshRefinement"]
     # Parse through the SDK's protobuf schema, as create_simulation_template does.
     parsed = ParseDict(amr, AdaptiveMeshRefinement())
-    assert amr["meshingMethod"] == ("MESH_METHOD_AUTO" if production else "MESH_METHOD_MANUAL")
-    assert parsed.target_cv_millions.value == 10
+    assert amr["meshingMethod"] == ("MESH_METHOD_AUTO" if mesh_mode == MESH_MODE_ADAPTIVE else "MESH_METHOD_MANUAL")
+    if mesh_mode == MESH_MODE_ADAPTIVE:
+        assert parsed.target_cv_millions.value == 10
+    else:
+        assert "targetCvMillions" not in amr
     assert amr["allTet"] == "ALL_TET_OFF"
     assert len(parsed.boundary_layer_profile) == 1
     profile = parsed.boundary_layer_profile[0]

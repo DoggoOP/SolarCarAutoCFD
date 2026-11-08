@@ -21,6 +21,8 @@ from .luminary_pipeline import (
     CaseConfig,
     DEFAULT_TRANSITION_MODEL,
     DEFAULT_TURBULENCE_MODEL,
+    MESH_MODE_ADAPTIVE,
+    MESH_MODE_CHOICES,
     TRANSITION_MODEL_CHOICES,
     TURBULENCE_MODEL_CHOICES,
     LuminaryCFDPipeline,
@@ -180,6 +182,7 @@ async def run_case(
     wind_direction: str = Form("1,0,0"),
     transition_model: str = Form(DEFAULT_TRANSITION_MODEL),
     turbulence_model: str = Form(DEFAULT_TURBULENCE_MODEL),
+    mesh_mode: str = Form(MESH_MODE_ADAPTIVE),
     mesh_min_size: float = Form(0.002),
     mesh_max_size: float = Form(0.05),
     frontal_area: str = Form(""),
@@ -211,6 +214,7 @@ async def run_case(
         TURBULENCE_MODEL_CHOICES,
         "turbulence model",
     )
+    mesh_mode_value = _parse_choice(mesh_mode, MESH_MODE_CHOICES, "mesh mode")
     body_surface_list = _parse_surfaces(body_surfaces)
     floor_surface_list = _parse_surfaces(floor_surfaces)
     farfield_surface_list = _parse_surfaces(farfield_surfaces)
@@ -238,6 +242,7 @@ async def run_case(
         mesh_max_size=mesh_max_size,
         transition_model=transition_model_value,
         turbulence_model=turbulence_model_value,
+        mesh_mode=mesh_mode_value,
         farfield_multiplier=farfield_multiplier,
         farfield_padding=farfield_padding_value,
         farfield_center_override=farfield_center_vec,

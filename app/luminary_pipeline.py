@@ -3,7 +3,6 @@ from __future__ import annotations
 import copy
 import json
 import math
-import os
 import subprocess
 import tempfile
 import uuid
@@ -15,7 +14,8 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 import numpy as np
 import luminarycloud as lc
 from luminarycloud.enum import QuantityType, ResidualType, CalculationType
-from luminarycloud.meshing import MeshGenerationParams, BoundaryLayerParams
+from luminarycloud.meshing import MeshGenerationParams, BoundaryLayerParams, RefinementRegion
+from luminarycloud.meshing.sizing_strategy import Minimal, TargetCount
 from luminarycloud.outputs import ForceOutputDefinition, ResidualOutputDefinition
 from luminarycloud.params.geometry import shapes as geom_shapes
 from luminarycloud.pipelines import api as pipelines_api
@@ -37,9 +37,11 @@ ADAPTATION_BOUNDARY_LAYER_INITIAL_SIZE = 1e-5  # metres
 ADAPTATION_BOUNDARY_LAYER_GROWTH_RATE = 1.2
 FLOOR_CLEARANCE_M = 0.001
 MAX_CFD_ITERATIONS = 15000
+FIXED_MESH_MAX_CFD_ITERATIONS = 5000
 DRAG_SETTLING_THRESHOLD_PERCENT = 0.5
 DRAG_SETTLING_THRESHOLD_FRACTION = DRAG_SETTLING_THRESHOLD_PERCENT / 100.0
 DRAG_SETTLING_START_ITERATION = 8000
+FIXED_MESH_DRAG_SETTLING_START_ITERATION = 1000
 DRAG_SETTLING_AVERAGING_ITERATIONS = 250
 DRAG_SETTLING_WINDOW_ITERATIONS = 1000
 TRANSITION_MODEL_CHOICES = {
@@ -52,6 +54,10 @@ TURBULENCE_MODEL_CHOICES = {
     "KOMEGA_SST",
     "SPALART_ALLMARAS",
 }
+MESH_MODE_ADAPTIVE = "LUMI_ADAPTATION"
+MESH_MODE_FIXED = "FIXED_MANUAL"
+MESH_MODE_CHOICES = {MESH_MODE_ADAPTIVE, MESH_MODE_FIXED}
+FIXED_MESH_TARGET_CELLS = 10_000_000
 
 
 def _normalize_choice(value: str, allowed: set[str], field_name: str) -> str:
@@ -76,6 +82,62 @@ def _floor_height(bbox_min_z: float, bbox_max_z: float, padding: float) -> float
     return min(bbox_min_z, bbox_max_z) - FLOOR_CLEARANCE_M - padding
 
 
+def _cfd_mesh_params(
+    config: CaseConfig,
+    geometry_id: str,
+    bbox_min: Tuple[float, float, float],
+    bbox_max: Tuple[float, float, float],
+) -> MeshGenerationParams:
+    """Build the base mesh for adaptation or a resolved fixed mesh."""
+    mesh_mode = _normalize_choice(config.mesh_mode, MESH_MODE_CHOICES, "mesh mode")
+    if mesh_mode == MESH_MODE_ADAPTIVE:
+        return MeshGenerationParams(
+            geometry_id=geometry_id,
+            sizing_strategy=Minimal(),
+            min_size=config.mesh_min_size,
+            max_size=config.mesh_max_size,
+            add_refinement=True,
+        )
+
+    length = bbox_max[0] - bbox_min[0]
+    width = bbox_max[1] - bbox_min[1]
+    height = bbox_max[2] - bbox_min[2]
+    near_body = geom_shapes.Cube(
+        min=Vector3(bbox_min[0] - 0.1 * length, bbox_min[1] - 0.3 * width, bbox_min[2]),
+        max=Vector3(bbox_max[0] + 0.1 * length, bbox_max[1] + 0.3 * width, bbox_max[2] + 0.5 * height),
+    )
+    # Extend the wake downstream of the uploaded car for the selected flow direction.
+    wake_length = 2 * length
+    flow_x, flow_y = config.farfield_direction[:2]
+    if flow_x < 0:
+        wake_x_min, wake_x_max = bbox_min[0] - wake_length, bbox_min[0] + 0.1 * length
+    else:
+        wake_x_min, wake_x_max = bbox_max[0] - 0.1 * length, bbox_max[0] + wake_length
+    lateral_drift = wake_length * abs(flow_y) / max(abs(flow_x), 0.1)
+    wake_y_padding = max(width, min(lateral_drift, 2 * width))
+    wake = geom_shapes.Cube(
+        min=Vector3(wake_x_min, bbox_min[1] - wake_y_padding, bbox_min[2]),
+        max=Vector3(wake_x_max, bbox_max[1] + wake_y_padding, bbox_max[2] + height),
+    )
+    return MeshGenerationParams(
+        geometry_id=geometry_id,
+        sizing_strategy=TargetCount(FIXED_MESH_TARGET_CELLS),
+        min_size=config.mesh_min_size,
+        max_size=max(config.mesh_max_size * 10, 0.5),
+        add_refinement=True,
+        boundary_layer_params=[BoundaryLayerParams(
+            surfaces=["*"],
+            n_layers=ADAPTATION_BOUNDARY_LAYERS,
+            initial_size=ADAPTATION_BOUNDARY_LAYER_INITIAL_SIZE,
+            growth_rate=ADAPTATION_BOUNDARY_LAYER_GROWTH_RATE,
+        )],
+        refinement_regions=[
+            RefinementRegion(name="Near car", h_limit=config.mesh_max_size, shape=near_body),
+            RefinementRegion(name="Wake", h_limit=config.mesh_max_size * 3, shape=wake),
+        ],
+    )
+
+
 
 
 @dataclass
@@ -87,6 +149,7 @@ class CaseConfig:
     farfield_speed: float
     mesh_min_size: float
     mesh_max_size: float
+    mesh_mode: str = MESH_MODE_ADAPTIVE
     transition_model: str = DEFAULT_TRANSITION_MODEL
     turbulence_model: str = DEFAULT_TURBULENCE_MODEL
     farfield_multiplier: float = 10.0
@@ -161,6 +224,7 @@ class SimulationTemplateBuilder:
         ground_speed: float = 24.59,
         rotating_wheels: bool = False,
         wheel_groups: Optional[Sequence[WheelMotionGroup]] = None,
+        mesh_mode: str = MESH_MODE_ADAPTIVE,
     ) -> dict:
         payload = copy.deepcopy(self._base_payload)
         ref_values = payload.setdefault("referenceValues", {})
@@ -245,11 +309,8 @@ class SimulationTemplateBuilder:
             turbulence_model=turbulence_model,
         )
 
-        # Configure adaptive mesh refinement and its manual boundary layer.
-        # On Railway (production), enable Lumi Mesh Adaptation with target of 10M CVs.
-        # On localhost (development), disable adaptation completely (generate minimal mesh only)
-        import os
-        is_production = os.getenv("RAILWAY_ENVIRONMENT") is not None
+        # The selected mode, independent of hosting environment, controls adaptation.
+        mesh_mode = _normalize_choice(mesh_mode, MESH_MODE_CHOICES, "mesh mode")
 
         amr = payload.setdefault("adaptiveMeshRefinement", {})
 
@@ -279,13 +340,12 @@ class SimulationTemplateBuilder:
             "surfaces": wall_surfaces,
         }]
 
-        if is_production:
-            # Production: Enable Lumi Mesh Adaptation with 10M CVs
+        if mesh_mode == MESH_MODE_ADAPTIVE:
             amr["meshingMethod"] = "MESH_METHOD_AUTO"
             amr.setdefault("targetCvMillions", {})["value"] = 10
         else:
-            # Local development: use the supplied base mesh without adaptation.
             amr["meshingMethod"] = "MESH_METHOD_MANUAL"
+            amr.pop("targetCvMillions", None)
 
         return payload
 
@@ -875,6 +935,7 @@ class LuminaryCFDPipeline:
         physics_id: str,
         force_surfaces: Sequence[str],
         callback: StatusCallback,
+        mesh_mode: str = MESH_MODE_ADAPTIVE,
     ) -> Tuple[int, bool]:
         """
         Stop when drag settles, or at the iteration limit.
@@ -887,7 +948,9 @@ class LuminaryCFDPipeline:
         callback("Setting up stopping conditions and force outputs...")
 
         # Set general stopping conditions
-        max_iterations = MAX_CFD_ITERATIONS
+        mesh_mode = _normalize_choice(mesh_mode, MESH_MODE_CHOICES, "mesh mode")
+        max_iterations = MAX_CFD_ITERATIONS if mesh_mode == MESH_MODE_ADAPTIVE else FIXED_MESH_MAX_CFD_ITERATIONS
+        start_iteration = DRAG_SETTLING_START_ITERATION if mesh_mode == MESH_MODE_ADAPTIVE else FIXED_MESH_DRAG_SETTLING_START_ITERATION
         template.update_general_stopping_conditions(
             max_iterations=max_iterations,
             stop_on_any=False,
@@ -962,7 +1025,7 @@ class LuminaryCFDPipeline:
                 # Luminary compares this value with a fractional deviation:
                 # a reported value of 0.112 is 11.2%, not 0.112%.
                 threshold=DRAG_SETTLING_THRESHOLD_FRACTION,
-                start_at_iteration=DRAG_SETTLING_START_ITERATION,
+                start_at_iteration=start_iteration,
                 averaging_iterations=DRAG_SETTLING_AVERAGING_ITERATIONS,
                 iterations_to_consider=DRAG_SETTLING_WINDOW_ITERATIONS,
             )
@@ -975,7 +1038,7 @@ class LuminaryCFDPipeline:
             f"  Drag convergence: {DRAG_SETTLING_THRESHOLD_PERCENT}% over "
             f"{DRAG_SETTLING_WINDOW_ITERATIONS} iterations of "
             f"{DRAG_SETTLING_AVERAGING_ITERATIONS}-iteration moving averages, "
-            f"starting at iteration {DRAG_SETTLING_START_ITERATION}; "
+            f"starting at iteration {start_iteration}; "
             f"maximum {max_iterations} iterations"
         )
 
@@ -1122,23 +1185,11 @@ class LuminaryCFDPipeline:
         _check_cancellation()
         callback("Generating mesh with Luminary meshing service …")
 
-        # Configure adaptive boundary layer
-        # Apply to all surfaces - Luminary will only apply to solid walls (body surfaces)
-        # farfield and symmetry boundaries won't get boundary layers
-        boundary_layer = BoundaryLayerParams(
-            surfaces=["*"],  # Wildcard to apply to all applicable surfaces
-            n_layers=40,
-            initial_size=0.00003484511739,
-            growth_rate=1.15,
-        )
-
-        mesh_params = MeshGenerationParams(
-            geometry_id=geometry.id,
-            min_size=config.mesh_min_size,
-            max_size=config.mesh_max_size,
-            add_refinement=True,
-            boundary_layer_params=[boundary_layer],
-        )
+        mesh_params = _cfd_mesh_params(config, geometry.id, bbox_min, bbox_max)
+        if config.mesh_mode == MESH_MODE_ADAPTIVE:
+            callback("Mesh mode: Lumi adaptation; minimal base mesh, 10M CV adaptation target")
+        else:
+            callback("Mesh mode: fixed mesh; 10M target cells with boundary layers and car/wake refinement")
         mesh = project.create_or_get_mesh(mesh_params, name=f"{case_name}-mesh")
         mesh_status = mesh.wait(interval_seconds=10)
         callback(f"Mesh generation finished with status {mesh_status.name}.")
@@ -1279,6 +1330,7 @@ class LuminaryCFDPipeline:
             ground_speed=config.ground_speed,
             rotating_wheels=config.rotating_wheels,
             wheel_groups=wheel_groups,
+            mesh_mode=config.mesh_mode,
         )
         tmp_params = self._template_builder.dump_payload(payload, label=case_name)
         try:
@@ -1330,6 +1382,7 @@ class LuminaryCFDPipeline:
             physics_id,
             force_surfaces,
             callback,
+            mesh_mode=config.mesh_mode,
         )
 
         _check_cancellation()
@@ -1495,6 +1548,7 @@ class LuminaryCFDPipeline:
                     model_settings={
                         "transition_model": config.transition_model,
                         "turbulence_model": config.turbulence_model,
+                        "mesh_mode": config.mesh_mode,
                     },
                     shellpower_data=shellpower_data,
                 )
@@ -1514,6 +1568,7 @@ class LuminaryCFDPipeline:
             "actual_iterations": actual_iterations,
             "transition_model": config.transition_model,
             "turbulence_model": config.turbulence_model,
+            "mesh_mode": config.mesh_mode,
             "frontal_area_m2": frontal_area,
             "frontal_area_source": frontal_area_source,
             "force_results": force_results,

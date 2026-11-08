@@ -41,10 +41,28 @@ def test_identical_active_cfd_submission_reuses_job(monkeypatch, tmp_path):
     assert different.json()["job_id"] != first.json()["job_id"]
     assert len(queued) == 2
 
+    # The two mesh strategies must create separate comparison runs.
+    monkeypatch.setattr(main, "_last_submission_time", 0.0)
+    fixed = client.post(
+        "/run",
+        data={"cad_label": "90Deg/6_Bugatti", "mesh_mode": "FIXED_MANUAL"},
+        files={"cad_file": ("car.step", b"same CAD bytes", "application/octet-stream")},
+    )
+    assert fixed.status_code == 200
+    assert fixed.json()["job_id"] != first.json()["job_id"]
+    assert len(queued) == 3
+
+    invalid = client.post(
+        "/run",
+        data={"cad_label": "90Deg/6_Bugatti", "mesh_mode": "unsupported"},
+        files={"cad_file": ("car.step", b"same CAD bytes", "application/octet-stream")},
+    )
+    assert invalid.status_code == 400
+
     # A failed case may be retried with the same CAD and settings.
     main.job_store.set_status(first.json()["job_id"], "failed")
     monkeypatch.setattr(main, "_last_submission_time", 0.0)
     third = submit()
     assert third.status_code == 200
     assert third.json()["job_id"] != first.json()["job_id"]
-    assert len(queued) == 3
+    assert len(queued) == 4
