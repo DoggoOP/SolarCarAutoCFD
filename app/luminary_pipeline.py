@@ -185,8 +185,8 @@ def _cfd_mesh_params(
         geometry_id=geometry_id,
         sizing_strategy=TargetCount(FIXED_MESH_TARGET_CELLS),
         min_size=config.mesh_min_size,
-        max_size=max(config.mesh_max_size * 10, 0.5),
-        add_refinement=True,
+        max_size=max(config.mesh_max_size * 20, 1.0),
+        add_refinement=False,
         boundary_layer_params=[BoundaryLayerParams(
             surfaces=list(boundary_layer_surfaces),
             n_layers=ADAPTATION_BOUNDARY_LAYERS,

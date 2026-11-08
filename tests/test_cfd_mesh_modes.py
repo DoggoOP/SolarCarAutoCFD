@@ -35,6 +35,8 @@ def test_mesh_modes_build_distinct_serializable_base_meshes():
     )
     assert isinstance(fixed.sizing_strategy, TargetCount)
     assert fixed.sizing_strategy.target_count == 10_000_000
+    assert fixed.max_size == 1.0
+    assert fixed.add_refinement is False
     assert len(fixed.refinement_regions) == 2
     assert len(fixed.boundary_layer_params) == 1
     proto = fixed._to_proto()
