@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 import numpy as np
 import luminarycloud as lc
 from luminarycloud.enum import QuantityType, ResidualType, CalculationType
-from luminarycloud.meshing import MeshGenerationParams, BoundaryLayerParams, RefinementRegion
+from luminarycloud.meshing import MeshGenerationParams, BoundaryLayerParams, RefinementRegion, ModelMeshingParams
 from luminarycloud.meshing.sizing_strategy import Minimal, TargetCount
 from luminarycloud.outputs import ForceOutputDefinition, ResidualOutputDefinition
 from luminarycloud.params.geometry import shapes as geom_shapes
@@ -58,6 +58,8 @@ MESH_MODE_ADAPTIVE = "LUMI_ADAPTATION"
 MESH_MODE_FIXED = "FIXED_MANUAL"
 MESH_MODE_CHOICES = {MESH_MODE_ADAPTIVE, MESH_MODE_FIXED}
 FIXED_MESH_TARGET_CELLS = 10_000_000
+FIXED_MESH_SURFACE_SIZE_RATIO = 0.6
+FIXED_MESH_SURFACE_CURVATURE_DEGREES = 5.0
 
 
 def _normalize_choice(value: str, allowed: set[str], field_name: str) -> str:
@@ -136,6 +138,7 @@ def _cfd_mesh_params(
     bbox_min: Tuple[float, float, float],
     bbox_max: Tuple[float, float, float],
     boundary_layer_surfaces: Optional[Sequence[str]] = None,
+    model_surfaces: Optional[Sequence[str]] = None,
 ) -> MeshGenerationParams:
     """Build the base mesh for adaptation or a resolved fixed mesh."""
     mesh_mode = _normalize_choice(config.mesh_mode, MESH_MODE_CHOICES, "mesh mode")
@@ -150,6 +153,8 @@ def _cfd_mesh_params(
 
     if not boundary_layer_surfaces:
         raise ValueError("Fixed mesh requires explicit boundary layer surface IDs")
+    if not model_surfaces:
+        raise ValueError("Fixed mesh requires explicit car and wheel surface IDs")
 
     length = bbox_max[0] - bbox_min[0]
     width = bbox_max[1] - bbox_min[1]
@@ -187,6 +192,11 @@ def _cfd_mesh_params(
         min_size=config.mesh_min_size,
         max_size=max(config.mesh_max_size * 20, 1.0),
         add_refinement=False,
+        model_meshing_params=[ModelMeshingParams(
+            surfaces=list(model_surfaces),
+            max_size=max(config.mesh_min_size, config.mesh_max_size * FIXED_MESH_SURFACE_SIZE_RATIO),
+            curvature=FIXED_MESH_SURFACE_CURVATURE_DEGREES,
+        )],
         boundary_layer_params=[BoundaryLayerParams(
             surfaces=list(boundary_layer_surfaces),
             n_layers=ADAPTATION_BOUNDARY_LAYERS,
@@ -1248,17 +1258,20 @@ class LuminaryCFDPipeline:
         callback("Generating mesh with Luminary meshing service …")
 
         boundary_layer_surfaces = None
+        model_surfaces = None
         if config.mesh_mode == MESH_MODE_FIXED:
             geometry_surfaces, _ = geometry.list_entities()
             boundary_layer_surfaces, body_count, floor_count = _fixed_mesh_wall_surfaces(
                 geometry_surfaces, bbox_min, bbox_max, floor_z
             )
+            model_surfaces = boundary_layer_surfaces[:body_count]
             callback(
                 f"Fixed mesh boundary layers: {body_count} car/wheel CAD surfaces and "
                 f"{floor_count} floor CAD surfaces selected; no farfield walls."
             )
         mesh_params = _cfd_mesh_params(
-            config, geometry.id, bbox_min, bbox_max, boundary_layer_surfaces
+            config, geometry.id, bbox_min, bbox_max, boundary_layer_surfaces,
+            model_surfaces=model_surfaces,
         )
         if config.mesh_mode == MESH_MODE_ADAPTIVE:
             callback("Mesh mode: Lumi adaptation; minimal base mesh, 10M CV adaptation target")

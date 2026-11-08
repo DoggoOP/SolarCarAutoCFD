@@ -32,6 +32,7 @@ def test_mesh_modes_build_distinct_serializable_base_meshes():
     fixed = _cfd_mesh_params(
         config, "geometry", bounds_min, bounds_max,
         boundary_layer_surfaces=["car-face", "wheel-face", "floor-face"],
+        model_surfaces=["car-face", "wheel-face"],
     )
     assert isinstance(fixed.sizing_strategy, TargetCount)
     assert fixed.sizing_strategy.target_count == 10_000_000
@@ -39,10 +40,15 @@ def test_mesh_modes_build_distinct_serializable_base_meshes():
     assert fixed.add_refinement is False
     assert len(fixed.refinement_regions) == 2
     assert len(fixed.boundary_layer_params) == 1
+    assert len(fixed.model_meshing_params) == 1
+    assert fixed.model_meshing_params[0].max_size == pytest.approx(0.03)
+    assert fixed.model_meshing_params[0].curvature == pytest.approx(5.0)
     proto = fixed._to_proto()
     assert proto.mesh_complexity_params.target_cells == 10_000_000
     assert len(proto.refine_params) == 2
     assert len(proto.bl_params) == 1
+    assert len(proto.model_params) == 1
+    assert list(proto.model_params[0].surfaces) == ["car-face", "wheel-face"]
     assert list(proto.bl_params[0].surfaces) == ["car-face", "wheel-face", "floor-face"]
     assert proto.refine_params[0].WhichOneof("shape") == "cube"
     assert proto.refine_params[1].WhichOneof("shape") == "cube"
@@ -65,7 +71,8 @@ def test_wake_region_follows_horizontal_airflow(direction, expected_axis):
         mesh_min_size=0.002, mesh_max_size=0.05, mesh_mode=MESH_MODE_FIXED,
     )
     params = _cfd_mesh_params(
-        config, "geometry", (0, -0.8, 0), (5.8, 0.8, 1.2), ["body", "floor"]
+        config, "geometry", (0, -0.8, 0), (5.8, 0.8, 1.2),
+        ["body", "floor"], model_surfaces=["body"],
     )
     wake = params.refinement_regions[1].shape
     if expected_axis == "negative_x":
