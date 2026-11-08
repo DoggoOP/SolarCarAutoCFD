@@ -60,6 +60,8 @@ MESH_MODE_CHOICES = {MESH_MODE_ADAPTIVE, MESH_MODE_FIXED}
 FIXED_MESH_TARGET_CELLS = 10_000_000
 FIXED_MESH_SURFACE_SIZE_RATIO = 0.5
 FIXED_MESH_SURFACE_CURVATURE_DEGREES = 4.0
+FIXED_MESH_WHEEL_SIZE_RATIO = 0.12
+FIXED_MESH_WHEEL_CURVATURE_DEGREES = 3.0
 
 
 def _normalize_choice(value: str, allowed: set[str], field_name: str) -> str:
@@ -120,6 +122,34 @@ def _fixed_mesh_wall_surfaces(
     return selected, len(body_ids), len(floor_ids)
 
 
+def _fixed_mesh_wheel_surfaces(
+    surfaces: Sequence[Any],
+    model_surfaces: Sequence[str],
+    bbox_min: Tuple[float, float, float],
+    explicit_surfaces: Optional[Sequence[str]] = None,
+) -> List[str]:
+    """Find wheel CAD faces before meshing, without refining the whole car."""
+    model_ids = set(model_surfaces)
+    explicit_ids = set(explicit_surfaces or ())
+    wheel_ids = []
+    for surface in surfaces:
+        if surface.id not in model_ids:
+            continue
+        if surface.id in explicit_ids or "wheel" in surface.id.lower():
+            wheel_ids.append(surface.id)
+            continue
+        low, high = surface.bbox_min, surface.bbox_max
+        extent = [getattr(high, axis) - getattr(low, axis) for axis in "xyz"]
+        # A compact face spanning the near-ground contact zone is a wheel
+        # candidate. Exclude long underbody panels and the farfield floor.
+        if (low.z <= bbox_min[2] + 0.065
+                and 0.10 <= extent[2] <= 0.8
+                and extent[0] <= 0.8
+                and extent[1] <= 0.8):
+            wheel_ids.append(surface.id)
+    return wheel_ids
+
+
 class _FixedMeshGenerationParams(MeshGenerationParams):
     """Write both box coordinate formats understood by Luminary's mesh service."""
 
@@ -139,6 +169,7 @@ def _cfd_mesh_params(
     bbox_max: Tuple[float, float, float],
     boundary_layer_surfaces: Optional[Sequence[str]] = None,
     model_surfaces: Optional[Sequence[str]] = None,
+    wheel_model_surfaces: Optional[Sequence[str]] = None,
 ) -> MeshGenerationParams:
     """Build the base mesh for adaptation or a resolved fixed mesh."""
     mesh_mode = _normalize_choice(config.mesh_mode, MESH_MODE_CHOICES, "mesh mode")
@@ -155,6 +186,11 @@ def _cfd_mesh_params(
         raise ValueError("Fixed mesh requires explicit boundary layer surface IDs")
     if not model_surfaces:
         raise ValueError("Fixed mesh requires explicit car and wheel surface IDs")
+    wheel_ids = set(wheel_model_surfaces or ())
+    if not wheel_ids.issubset(set(model_surfaces)):
+        raise ValueError("Wheel mesh surfaces must be a subset of car/wheel model surfaces")
+    body_model_surfaces = [surface for surface in model_surfaces if surface not in wheel_ids]
+    wheel_model_surfaces = [surface for surface in model_surfaces if surface in wheel_ids]
 
     length = bbox_max[0] - bbox_min[0]
     width = bbox_max[1] - bbox_min[1]
@@ -192,11 +228,19 @@ def _cfd_mesh_params(
         min_size=config.mesh_min_size,
         max_size=max(config.mesh_max_size * 20, 1.0),
         add_refinement=False,
-        model_meshing_params=[ModelMeshingParams(
-            surfaces=list(model_surfaces),
-            max_size=max(config.mesh_min_size, config.mesh_max_size * FIXED_MESH_SURFACE_SIZE_RATIO),
-            curvature=FIXED_MESH_SURFACE_CURVATURE_DEGREES,
-        )],
+        model_meshing_params=(
+            [ModelMeshingParams(
+                surfaces=body_model_surfaces,
+                max_size=max(config.mesh_min_size, config.mesh_max_size * FIXED_MESH_SURFACE_SIZE_RATIO),
+                curvature=FIXED_MESH_SURFACE_CURVATURE_DEGREES,
+            )] if body_model_surfaces else []
+        ) + (
+            [ModelMeshingParams(
+                surfaces=wheel_model_surfaces,
+                max_size=max(config.mesh_min_size, config.mesh_max_size * FIXED_MESH_WHEEL_SIZE_RATIO),
+                curvature=FIXED_MESH_WHEEL_CURVATURE_DEGREES,
+            )] if wheel_model_surfaces else []
+        ),
         boundary_layer_params=[BoundaryLayerParams(
             surfaces=list(boundary_layer_surfaces),
             n_layers=ADAPTATION_BOUNDARY_LAYERS,
@@ -1267,19 +1311,29 @@ class LuminaryCFDPipeline:
 
         boundary_layer_surfaces = None
         model_surfaces = None
+        wheel_model_surfaces = None
         if config.mesh_mode == MESH_MODE_FIXED:
             geometry_surfaces, _ = geometry.list_entities()
             boundary_layer_surfaces, body_count, floor_count = _fixed_mesh_wall_surfaces(
                 geometry_surfaces, bbox_min, bbox_max, floor_z
             )
             model_surfaces = boundary_layer_surfaces[:body_count]
+            wheel_model_surfaces = _fixed_mesh_wheel_surfaces(
+                geometry_surfaces, model_surfaces, bbox_min, config.wheel_surfaces
+            )
             callback(
                 f"Fixed mesh boundary layers: {body_count} car/wheel CAD surfaces and "
                 f"{floor_count} floor CAD surfaces selected; no farfield walls."
             )
+            callback(
+                f"Fixed mesh surface sizing: {len(model_surfaces) - len(wheel_model_surfaces)} "
+                f"body faces at {max(config.mesh_min_size, config.mesh_max_size * FIXED_MESH_SURFACE_SIZE_RATIO):.3f} m; "
+                f"{len(wheel_model_surfaces)} wheel faces at "
+                f"{max(config.mesh_min_size, config.mesh_max_size * FIXED_MESH_WHEEL_SIZE_RATIO):.3f} m."
+            )
         mesh_params = _cfd_mesh_params(
             config, geometry.id, bbox_min, bbox_max, boundary_layer_surfaces,
-            model_surfaces=model_surfaces,
+            model_surfaces=model_surfaces, wheel_model_surfaces=wheel_model_surfaces,
         )
         if config.mesh_mode == MESH_MODE_ADAPTIVE:
             callback("Mesh mode: Lumi adaptation; minimal base mesh, 10M CV adaptation target")

@@ -11,6 +11,7 @@ from app.luminary_pipeline import (
     MESH_MODE_FIXED,
     _cfd_mesh_params,
     _fixed_mesh_wall_surfaces,
+    _fixed_mesh_wheel_surfaces,
 )
 
 
@@ -33,6 +34,7 @@ def test_mesh_modes_build_distinct_serializable_base_meshes():
         config, "geometry", bounds_min, bounds_max,
         boundary_layer_surfaces=["car-face", "wheel-face", "floor-face"],
         model_surfaces=["car-face", "wheel-face"],
+        wheel_model_surfaces=["wheel-face"],
     )
     assert isinstance(fixed.sizing_strategy, TargetCount)
     assert fixed.sizing_strategy.target_count == 10_000_000
@@ -40,15 +42,18 @@ def test_mesh_modes_build_distinct_serializable_base_meshes():
     assert fixed.add_refinement is False
     assert len(fixed.refinement_regions) == 2
     assert len(fixed.boundary_layer_params) == 1
-    assert len(fixed.model_meshing_params) == 1
+    assert len(fixed.model_meshing_params) == 2
     assert fixed.model_meshing_params[0].max_size == pytest.approx(0.025)
     assert fixed.model_meshing_params[0].curvature == pytest.approx(4.0)
+    assert fixed.model_meshing_params[1].max_size == pytest.approx(0.006)
+    assert fixed.model_meshing_params[1].curvature == pytest.approx(3.0)
     proto = fixed._to_proto()
     assert proto.mesh_complexity_params.target_cells == 10_000_000
     assert len(proto.refine_params) == 2
     assert len(proto.bl_params) == 1
-    assert len(proto.model_params) == 1
-    assert list(proto.model_params[0].surfaces) == ["car-face", "wheel-face"]
+    assert len(proto.model_params) == 2
+    assert list(proto.model_params[0].surfaces) == ["car-face"]
+    assert list(proto.model_params[1].surfaces) == ["wheel-face"]
     assert list(proto.bl_params[0].surfaces) == ["car-face", "wheel-face", "floor-face"]
     assert proto.refine_params[0].WhichOneof("shape") == "cube"
     assert proto.refine_params[1].WhichOneof("shape") == "cube"
@@ -106,3 +111,23 @@ def test_fixed_mesh_selects_geometry_walls_and_floor_not_farfield():
 
     with pytest.raises(RuntimeError, match="floor surfaces"):
         _fixed_mesh_wall_surfaces(faces[:2], (0, -0.8, 0), (5.8, 0.8, 1.2), -0.001)
+
+
+def test_wheel_surface_sizing_only_selects_compact_contact_faces():
+    def surface(name, low, high):
+        return SimpleNamespace(
+            id=name,
+            bbox_min=SimpleNamespace(**dict(zip("xyz", low))),
+            bbox_max=SimpleNamespace(**dict(zip("xyz", high))),
+        )
+
+    faces = [
+        surface("body", (0, -0.8, 0.01), (5.8, 0.8, 1.2)),
+        surface("front-wheel", (1, -0.7, 0), (1.55, -0.2, 0.55)),
+        surface("rear-contact", (4, -0.3, 0), (4.6, 0.3, 0.56)),
+        surface("small-underside", (2, -0.2, 0), (2.5, 0.2, 0.04)),
+        surface("floor", (-100, -58, -0.001), (48, 58, -0.001)),
+    ]
+    assert _fixed_mesh_wheel_surfaces(
+        faces, [face.id for face in faces[:-1]], (0, -0.8, 0),
+    ) == ["front-wheel", "rear-contact"]
