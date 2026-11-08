@@ -58,8 +58,8 @@ MESH_MODE_ADAPTIVE = "LUMI_ADAPTATION"
 MESH_MODE_FIXED = "FIXED_MANUAL"
 MESH_MODE_CHOICES = {MESH_MODE_ADAPTIVE, MESH_MODE_FIXED}
 FIXED_MESH_TARGET_CELLS = 10_000_000
-FIXED_MESH_SURFACE_SIZE_RATIO = 0.6
-FIXED_MESH_SURFACE_CURVATURE_DEGREES = 5.0
+FIXED_MESH_SURFACE_SIZE_RATIO = 0.5
+FIXED_MESH_SURFACE_CURVATURE_DEGREES = 4.0
 
 
 def _normalize_choice(value: str, allowed: set[str], field_name: str) -> str:
@@ -222,6 +222,7 @@ class CaseConfig:
     mesh_min_size: float
     mesh_max_size: float
     mesh_mode: str = MESH_MODE_ADAPTIVE
+    max_iterations: Optional[int] = None
     transition_model: str = DEFAULT_TRANSITION_MODEL
     turbulence_model: str = DEFAULT_TURBULENCE_MODEL
     farfield_multiplier: float = 10.0
@@ -1008,6 +1009,7 @@ class LuminaryCFDPipeline:
         force_surfaces: Sequence[str],
         callback: StatusCallback,
         mesh_mode: str = MESH_MODE_ADAPTIVE,
+        max_iterations_override: Optional[int] = None,
     ) -> Tuple[int, bool]:
         """
         Stop when drag settles, or at the iteration limit.
@@ -1021,7 +1023,13 @@ class LuminaryCFDPipeline:
 
         # Set general stopping conditions
         mesh_mode = _normalize_choice(mesh_mode, MESH_MODE_CHOICES, "mesh mode")
-        max_iterations = MAX_CFD_ITERATIONS if mesh_mode == MESH_MODE_ADAPTIVE else FIXED_MESH_MAX_CFD_ITERATIONS
+        default_max_iterations = (
+            MAX_CFD_ITERATIONS if mesh_mode == MESH_MODE_ADAPTIVE
+            else FIXED_MESH_MAX_CFD_ITERATIONS
+        )
+        max_iterations = default_max_iterations if max_iterations_override is None else max_iterations_override
+        if max_iterations < 1:
+            raise ValueError("Max iterations must be a positive whole number.")
         start_iteration = DRAG_SETTLING_START_ITERATION if mesh_mode == MESH_MODE_ADAPTIVE else FIXED_MESH_DRAG_SETTLING_START_ITERATION
         template.update_general_stopping_conditions(
             max_iterations=max_iterations,
@@ -1475,6 +1483,7 @@ class LuminaryCFDPipeline:
             force_surfaces,
             callback,
             mesh_mode=config.mesh_mode,
+            max_iterations_override=config.max_iterations,
         )
 
         _check_cancellation()
@@ -1658,6 +1667,7 @@ class LuminaryCFDPipeline:
             "status": status.name,
             "convergence_status": convergence_status,
             "actual_iterations": actual_iterations,
+            "max_iterations": max_iterations,
             "transition_model": config.transition_model,
             "turbulence_model": config.turbulence_model,
             "mesh_mode": config.mesh_mode,

@@ -41,8 +41,8 @@ def test_mesh_modes_build_distinct_serializable_base_meshes():
     assert len(fixed.refinement_regions) == 2
     assert len(fixed.boundary_layer_params) == 1
     assert len(fixed.model_meshing_params) == 1
-    assert fixed.model_meshing_params[0].max_size == pytest.approx(0.03)
-    assert fixed.model_meshing_params[0].curvature == pytest.approx(5.0)
+    assert fixed.model_meshing_params[0].max_size == pytest.approx(0.025)
+    assert fixed.model_meshing_params[0].curvature == pytest.approx(4.0)
     proto = fixed._to_proto()
     assert proto.mesh_complexity_params.target_cells == 10_000_000
     assert len(proto.refine_params) == 2

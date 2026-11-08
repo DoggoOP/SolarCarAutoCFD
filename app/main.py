@@ -79,6 +79,15 @@ def _parse_optional_float(raw: str) -> Optional[float]:
         raise HTTPException(status_code=400, detail="Invalid numeric value.") from exc
 
 
+def _parse_optional_positive_int(raw: str, field_name: str) -> Optional[int]:
+    value = raw.strip()
+    if not value:
+        return None
+    if not value.isdecimal() or int(value) < 1:
+        raise HTTPException(status_code=400, detail=f"{field_name} must be a positive whole number.")
+    return int(value)
+
+
 def _parse_choice(raw: str, allowed: Collection[str], field_name: str) -> str:
     value = raw.strip().upper()
     if value not in allowed:
@@ -183,6 +192,7 @@ async def run_case(
     transition_model: str = Form(DEFAULT_TRANSITION_MODEL),
     turbulence_model: str = Form(DEFAULT_TURBULENCE_MODEL),
     mesh_mode: str = Form(MESH_MODE_ADAPTIVE),
+    max_iterations: str = Form(""),
     mesh_min_size: float = Form(0.002),
     mesh_max_size: float = Form(0.05),
     frontal_area: str = Form(""),
@@ -215,6 +225,7 @@ async def run_case(
         "turbulence model",
     )
     mesh_mode_value = _parse_choice(mesh_mode, MESH_MODE_CHOICES, "mesh mode")
+    max_iterations_value = _parse_optional_positive_int(max_iterations, "Max iterations")
     body_surface_list = _parse_surfaces(body_surfaces)
     floor_surface_list = _parse_surfaces(floor_surfaces)
     farfield_surface_list = _parse_surfaces(farfield_surfaces)
@@ -243,6 +254,7 @@ async def run_case(
         transition_model=transition_model_value,
         turbulence_model=turbulence_model_value,
         mesh_mode=mesh_mode_value,
+        max_iterations=max_iterations_value,
         farfield_multiplier=farfield_multiplier,
         farfield_padding=farfield_padding_value,
         farfield_center_override=farfield_center_vec,

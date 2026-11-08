@@ -84,6 +84,24 @@ def test_fixed_mesh_stops_at_shorter_limit_and_checks_drag_from_1000():
 
 
 @pytest.mark.parametrize(
+    ("mesh_mode", "requested_limit", "expected_start"),
+    [("LUMI_ADAPTATION", 20000, 8000), (MESH_MODE_FIXED, 7000, 1000)],
+)
+def test_custom_iteration_limit_applies_to_both_mesh_modes(
+    mesh_mode, requested_limit, expected_start
+):
+    template = FakeTemplate()
+    maximum, _ = LuminaryCFDPipeline._setup_stopping_conditions(
+        object.__new__(LuminaryCFDPipeline), template, "physics", ["body"],
+        lambda _: None, mesh_mode=mesh_mode,
+        max_iterations_override=requested_limit,
+    )
+    assert maximum == requested_limit
+    assert template.general["max_iterations"] == requested_limit
+    assert template.conditions[0].start_at_iteration == expected_start
+
+
+@pytest.mark.parametrize(
     ("drag_settled", "hit_limit", "expected"),
     [(True, False, "DRAG_SETTLED"), (False, True, "ITERATION_LIMIT")],
 )

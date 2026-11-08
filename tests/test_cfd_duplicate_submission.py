@@ -52,12 +52,43 @@ def test_identical_active_cfd_submission_reuses_job(monkeypatch, tmp_path):
     assert fixed.json()["job_id"] != first.json()["job_id"]
     assert len(queued) == 3
 
+    # Iteration caps change the CFD setup, so they must not deduplicate a run.
+    monkeypatch.setattr(main, "_last_submission_time", 0.0)
+    extended = client.post(
+        "/run",
+        data={"cad_label": "90Deg/6_Bugatti", "max_iterations": "20000"},
+        files={"cad_file": ("car.step", b"same CAD bytes", "application/octet-stream")},
+    )
+    assert extended.status_code == 200
+    assert extended.json()["job_id"] != first.json()["job_id"]
+    assert len(queued) == 4
+    received = []
+
+    class FakePipeline:
+        def __init__(self, settings):
+            pass
+
+        def run_case(self, config, callback, check_cancelled):
+            received.append(config.max_iterations)
+            return {}
+
+    monkeypatch.setattr(main, "LuminaryCFDPipeline", FakePipeline)
+    queued[-1]()
+    assert received == [20000]
+
     invalid = client.post(
         "/run",
         data={"cad_label": "90Deg/6_Bugatti", "mesh_mode": "unsupported"},
         files={"cad_file": ("car.step", b"same CAD bytes", "application/octet-stream")},
     )
     assert invalid.status_code == 400
+    for invalid_limit in ("0", "-5", "1.5", "banana"):
+        response = client.post(
+            "/run",
+            data={"cad_label": "90Deg/6_Bugatti", "max_iterations": invalid_limit},
+            files={"cad_file": ("car.step", b"same CAD bytes", "application/octet-stream")},
+        )
+        assert response.status_code == 400
 
     # A failed case may be retried with the same CAD and settings.
     main.job_store.set_status(first.json()["job_id"], "failed")
@@ -65,4 +96,4 @@ def test_identical_active_cfd_submission_reuses_job(monkeypatch, tmp_path):
     third = submit()
     assert third.status_code == 200
     assert third.json()["job_id"] != first.json()["job_id"]
-    assert len(queued) == 4
+    assert len(queued) == 5

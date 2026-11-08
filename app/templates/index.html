@@ -194,10 +194,15 @@
       <div>
         <label for="mesh_mode">Mesh strategy</label>
         <select id="mesh_mode" name="mesh_mode">
-          <option value="LUMI_ADAPTATION" selected>Lumi Mesh Adaptation (15,000 iterations)</option>
-          <option value="FIXED_MANUAL">Fixed mesh with car/wake refinement (5,000 iterations)</option>
+          <option value="LUMI_ADAPTATION" selected>Lumi Mesh Adaptation (default 15,000 iterations)</option>
+          <option value="FIXED_MANUAL">Fixed mesh with car/wake refinement (default 5,000 iterations)</option>
         </select>
         <small>Both target 10 million cells. Drag settling is checked after 8,000 iterations with adaptation or 1,000 with a fixed mesh.</small>
+      </div>
+      <div>
+        <label for="max_iterations">Max iterations (optional)</label>
+        <input id="max_iterations" name="max_iterations" type="number" min="1" step="1" placeholder="Use mesh strategy default" />
+        <small>Leave blank for 15,000 with adaptation or 5,000 with a fixed mesh. The run can still stop earlier if drag settles.</small>
       </div>
       <div>
         <label for="mesh_min_size">Mesh min size (m; fixed mesh)</label>
@@ -312,6 +317,9 @@
           {% endif %}
           {% if job.result.mesh_mode %}
           <p style="font-size:0.85rem;color:#64748b;">Mesh: {{ "Lumi Mesh Adaptation" if job.result.mesh_mode == "LUMI_ADAPTATION" else "Fixed refined mesh" }}</p>
+          {% endif %}
+          {% if job.result.max_iterations %}
+          <p style="font-size:0.85rem;color:#64748b;">Iterations: {{ job.result.actual_iterations or "—" }} / {{ job.result.max_iterations }} · {{ job.result.convergence_status or "UNKNOWN" }}</p>
           {% endif %}
           {% endif %}
           {% if job.error %}
@@ -428,6 +436,7 @@
                        CFD models: turbulence ${job.result.turbulence_model || 'N/A'}, transition ${job.result.transition_model || 'N/A'}
                      </p>` : ''}
                      ${job.result.mesh_mode ? `<p style="font-size:0.85rem;color:#64748b;">Mesh: ${job.result.mesh_mode === 'LUMI_ADAPTATION' ? 'Lumi Mesh Adaptation' : 'Fixed refined mesh'}</p>` : ''}
+                     ${job.result.max_iterations ? `<p style="font-size:0.85rem;color:#64748b;">Iterations: ${job.result.actual_iterations ?? '—'} / ${job.result.max_iterations} · ${job.result.convergence_status || 'UNKNOWN'}</p>` : ''}
                      ${sheetsUrl ? `<p>
                        <a href="${sheetsUrl}"
                           target="_blank"
