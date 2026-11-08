@@ -27,7 +27,7 @@ AutoCFD automates the full Luminary Cloud CFD workflow for solar-car geometries 
 - **Luminary Cloud automation**: geometry import, farfield creation, meshing, simulation setup, and monitoring.
 - **Smart meshing** with adaptive refinement, automatic farfield sizing, and optional rotating wheels (including auto-detected surfaces and motion frames).
 - **Automatic post-processing**: drag, viscous drag, pressure drag, side force, lift, center of pressure, CdA/CdW, and convergence metadata.
-- **Drag-based stopping**: after iteration 8,000, stop only when the 250-iteration moving average of drag stays within 0.5% over 1,000 iterations; otherwise stop at 15,000 and report `ITERATION_LIMIT` instead of `DRAG_SETTLED`.
+- **Drag-based stopping**: stop when the 250-iteration moving average of drag stays within 0.5% over 1,000 iterations, starting at iteration 8,000 for adaptation or 1,000 for fixed meshes. The default caps are 15,000 and 10,000 iterations respectively; reaching a cap reports `ITERATION_LIMIT` instead of `DRAG_SETTLED`.
 - **Shellpower solar array simulation**: automatically places Maxeon Gen 7 solar cells on the car surface, optimizes layout for sun exposure across WSC racing hours, and reports peak power and daily energy.
 - **Google Sheets logging** with structured headers, solar array results, array map images, and hyperlinks to Luminary simulations.
 - **Historical backfill script** to import previous Luminary runs.
