@@ -82,11 +82,60 @@ def _floor_height(bbox_min_z: float, bbox_max_z: float, padding: float) -> float
     return min(bbox_min_z, bbox_max_z) - FLOOR_CLEARANCE_M - padding
 
 
+def _fixed_mesh_wall_surfaces(
+    surfaces: Sequence[Any],
+    bbox_min: Tuple[float, float, float],
+    bbox_max: Tuple[float, float, float],
+    floor_z: float,
+) -> Tuple[List[str], int, int]:
+    """Select car/wheel faces and the moving floor from post-farfield CAD faces."""
+    tolerance = 1e-4
+    body_ids: List[str] = []
+    floor_ids: List[str] = []
+    for surface in surfaces:
+        low, high = surface.bbox_min, surface.bbox_max
+        inside_car = all(
+            getattr(low, axis) >= minimum - tolerance
+            and getattr(high, axis) <= maximum + tolerance
+            for axis, minimum, maximum in zip("xyz", bbox_min, bbox_max)
+        )
+        is_floor = (
+            abs(low.z - floor_z) <= tolerance
+            and abs(high.z - floor_z) <= tolerance
+            and high.x - low.x >= 0.9 * (bbox_max[0] - bbox_min[0])
+            and high.y - low.y >= 0.9 * (bbox_max[1] - bbox_min[1])
+        )
+        if inside_car:
+            body_ids.append(surface.id)
+        elif is_floor:
+            floor_ids.append(surface.id)
+    if not body_ids or not floor_ids:
+        raise RuntimeError(
+            "Fixed mesh boundary layers need explicit car/wheel and floor CAD surfaces; "
+            f"found {len(body_ids)} car/wheel and {len(floor_ids)} floor surfaces."
+        )
+    selected = list(dict.fromkeys(body_ids + floor_ids))
+    return selected, len(body_ids), len(floor_ids)
+
+
+class _FixedMeshGenerationParams(MeshGenerationParams):
+    """Write both box coordinate formats understood by Luminary's mesh service."""
+
+    def _to_proto(self):
+        proto = super()._to_proto()
+        for region, serialized in zip(self.refinement_regions, proto.refine_params):
+            if isinstance(region.shape, geom_shapes.Cube):
+                serialized.cube.min.CopyFrom(region.shape.min._to_ad_proto())
+                serialized.cube.max.CopyFrom(region.shape.max._to_ad_proto())
+        return proto
+
+
 def _cfd_mesh_params(
     config: CaseConfig,
     geometry_id: str,
     bbox_min: Tuple[float, float, float],
     bbox_max: Tuple[float, float, float],
+    boundary_layer_surfaces: Optional[Sequence[str]] = None,
 ) -> MeshGenerationParams:
     """Build the base mesh for adaptation or a resolved fixed mesh."""
     mesh_mode = _normalize_choice(config.mesh_mode, MESH_MODE_CHOICES, "mesh mode")
@@ -99,6 +148,9 @@ def _cfd_mesh_params(
             add_refinement=True,
         )
 
+    if not boundary_layer_surfaces:
+        raise ValueError("Fixed mesh requires explicit boundary layer surface IDs")
+
     length = bbox_max[0] - bbox_min[0]
     width = bbox_max[1] - bbox_min[1]
     height = bbox_max[2] - bbox_min[2]
@@ -106,27 +158,37 @@ def _cfd_mesh_params(
         min=Vector3(bbox_min[0] - 0.1 * length, bbox_min[1] - 0.3 * width, bbox_min[2]),
         max=Vector3(bbox_max[0] + 0.1 * length, bbox_max[1] + 0.3 * width, bbox_max[2] + 0.5 * height),
     )
-    # Extend the wake downstream of the uploaded car for the selected flow direction.
-    wake_length = 2 * length
+    # Sweep a strip from the downwind edge along the horizontal airflow vector.
     flow_x, flow_y = config.farfield_direction[:2]
-    if flow_x < 0:
-        wake_x_min, wake_x_max = bbox_min[0] - wake_length, bbox_min[0] + 0.1 * length
-    else:
-        wake_x_min, wake_x_max = bbox_max[0] - 0.1 * length, bbox_max[0] + wake_length
-    lateral_drift = wake_length * abs(flow_y) / max(abs(flow_x), 0.1)
-    wake_y_padding = max(width, min(lateral_drift, 2 * width))
+    horizontal_speed = math.hypot(flow_x, flow_y)
+    if horizontal_speed <= 0:
+        raise ValueError("Fixed mesh wake refinement needs a horizontal wind direction")
+    flow_x, flow_y = flow_x / horizontal_speed, flow_y / horizontal_speed
+    across_x, across_y = -flow_y, flow_x
+    center_x = (bbox_min[0] + bbox_max[0]) / 2
+    center_y = (bbox_min[1] + bbox_max[1]) / 2
+    downwind_edge = 0.5 * length * abs(flow_x) + 0.5 * width * abs(flow_y)
+    wake_start = (center_x + flow_x * downwind_edge, center_y + flow_y * downwind_edge)
+    wake_end = (wake_start[0] + flow_x * 2 * length, wake_start[1] + flow_y * 2 * length)
+    half_wake_width = 0.75 * width
+    wake_corners = [
+        (point[0] + side * across_x * half_wake_width,
+         point[1] + side * across_y * half_wake_width)
+        for point in (wake_start, wake_end)
+        for side in (-1, 1)
+    ]
     wake = geom_shapes.Cube(
-        min=Vector3(wake_x_min, bbox_min[1] - wake_y_padding, bbox_min[2]),
-        max=Vector3(wake_x_max, bbox_max[1] + wake_y_padding, bbox_max[2] + height),
+        min=Vector3(min(x for x, _ in wake_corners), min(y for _, y in wake_corners), bbox_min[2]),
+        max=Vector3(max(x for x, _ in wake_corners), max(y for _, y in wake_corners), bbox_max[2] + height),
     )
-    return MeshGenerationParams(
+    return _FixedMeshGenerationParams(
         geometry_id=geometry_id,
         sizing_strategy=TargetCount(FIXED_MESH_TARGET_CELLS),
         min_size=config.mesh_min_size,
         max_size=max(config.mesh_max_size * 10, 0.5),
         add_refinement=True,
         boundary_layer_params=[BoundaryLayerParams(
-            surfaces=["*"],
+            surfaces=list(boundary_layer_surfaces),
             n_layers=ADAPTATION_BOUNDARY_LAYERS,
             initial_size=ADAPTATION_BOUNDARY_LAYER_INITIAL_SIZE,
             growth_rate=ADAPTATION_BOUNDARY_LAYER_GROWTH_RATE,
@@ -1185,11 +1247,28 @@ class LuminaryCFDPipeline:
         _check_cancellation()
         callback("Generating mesh with Luminary meshing service …")
 
-        mesh_params = _cfd_mesh_params(config, geometry.id, bbox_min, bbox_max)
+        boundary_layer_surfaces = None
+        if config.mesh_mode == MESH_MODE_FIXED:
+            geometry_surfaces, _ = geometry.list_entities()
+            boundary_layer_surfaces, body_count, floor_count = _fixed_mesh_wall_surfaces(
+                geometry_surfaces, bbox_min, bbox_max, floor_z
+            )
+            callback(
+                f"Fixed mesh boundary layers: {body_count} car/wheel CAD surfaces and "
+                f"{floor_count} floor CAD surfaces selected; no farfield walls."
+            )
+        mesh_params = _cfd_mesh_params(
+            config, geometry.id, bbox_min, bbox_max, boundary_layer_surfaces
+        )
         if config.mesh_mode == MESH_MODE_ADAPTIVE:
             callback("Mesh mode: Lumi adaptation; minimal base mesh, 10M CV adaptation target")
         else:
             callback("Mesh mode: fixed mesh; 10M target cells with boundary layers and car/wake refinement")
+            for region in mesh_params.refinement_regions:
+                callback(
+                    f"  Refinement {region.name}: min={tuple(region.shape.min)}, "
+                    f"max={tuple(region.shape.max)}, size limit={region.h_limit:.3f} m"
+                )
         mesh = project.create_or_get_mesh(mesh_params, name=f"{case_name}-mesh")
         mesh_status = mesh.wait(interval_seconds=10)
         callback(f"Mesh generation finished with status {mesh_status.name}.")
