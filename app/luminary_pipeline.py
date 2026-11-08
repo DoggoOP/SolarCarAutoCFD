@@ -36,8 +36,9 @@ ADAPTATION_BOUNDARY_LAYERS = 30
 ADAPTATION_BOUNDARY_LAYER_INITIAL_SIZE = 1e-5  # metres
 ADAPTATION_BOUNDARY_LAYER_GROWTH_RATE = 1.2
 FLOOR_CLEARANCE_M = 0.001
-MAX_CFD_ITERATIONS = 12500
+MAX_CFD_ITERATIONS = 15000
 DRAG_SETTLING_THRESHOLD_PERCENT = 0.5
+DRAG_SETTLING_THRESHOLD_FRACTION = DRAG_SETTLING_THRESHOLD_PERCENT / 100.0
 DRAG_SETTLING_START_ITERATION = 8000
 DRAG_SETTLING_AVERAGING_ITERATIONS = 250
 DRAG_SETTLING_WINDOW_ITERATIONS = 1000
@@ -958,7 +959,9 @@ class LuminaryCFDPipeline:
         try:
             template.create_or_update_stopping_condition(
                 output_definition_id=drag_output_id,
-                threshold=DRAG_SETTLING_THRESHOLD_PERCENT,
+                # Luminary compares this value with a fractional deviation:
+                # a reported value of 0.112 is 11.2%, not 0.112%.
+                threshold=DRAG_SETTLING_THRESHOLD_FRACTION,
                 start_at_iteration=DRAG_SETTLING_START_ITERATION,
                 averaging_iterations=DRAG_SETTLING_AVERAGING_ITERATIONS,
                 iterations_to_consider=DRAG_SETTLING_WINDOW_ITERATIONS,
@@ -1003,15 +1006,19 @@ class LuminaryCFDPipeline:
     ) -> Tuple[str, Optional[int]]:
         """Distinguish drag convergence from the hard iteration limit."""
         try:
-            conditions = simulation.get_stopping_condition_status().condition_results
+            status = simulation.get_stopping_condition_status()
+            conditions = status.condition_results
         except Exception as exc:
             callback(f"Warning: Could not verify drag convergence: {exc}")
             return "UNKNOWN", None
 
-        drag = next((c for c in conditions if c.output_name == "Drag (Fx)"), None)
+        # Luminary reports this force condition as "Force (%) - Max Deviation",
+        # rather than the name of its source output definition, "Drag (Fx)".
+        # The template has exactly one non-force stopping condition: drag.
+        drag = next((c for c in conditions if not c.is_force_condition), None)
         limit = next((c for c in conditions if c.output_name == "Iteration Index"), None)
         actual_iterations = int(round(limit.value)) if limit else None
-        if drag and drag.satisfied:
+        if drag and drag.satisfied and status.overall_success and not status.force_stopped:
             callback(
                 f"Drag settled after {actual_iterations} iterations "
                 f"({DRAG_SETTLING_THRESHOLD_PERCENT}% threshold)."
