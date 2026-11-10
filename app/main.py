@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
@@ -35,6 +36,7 @@ job_store = JobStore()
 executor = ThreadPoolExecutor(max_workers=5)
 _submission_lock = Lock()
 _last_submission_time = 0.0
+DRIVING_SPEED_MPS = 24.59
 
 TRANSITION_MODEL_OPTIONS = [
     {"value": "GAMMA_RE_THETA_2009", "label": "Gamma-ReTheta 2009"},
@@ -99,6 +101,22 @@ def _parse_choice(raw: str, allowed: Collection[str], field_name: str) -> str:
     return value
 
 
+def _crosswind_apparent_wind(
+    driving_speed: float, magnitude_raw: str, flow_direction: str
+) -> Tuple[float, Tuple[float, float, float]]:
+    """Combine car headwind with a lateral wind component in CAD axes."""
+    try:
+        magnitude = float(magnitude_raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid crosswind magnitude.") from exc
+    if not math.isfinite(magnitude) or magnitude < 0:
+        raise HTTPException(status_code=400, detail="Crosswind magnitude must be non-negative and finite.")
+    if flow_direction not in {"+y", "-y"}:
+        raise HTTPException(status_code=400, detail="Crosswind flow direction must be +Y or -Y.")
+    lateral_speed = magnitude if flow_direction == "+y" else -magnitude
+    return math.hypot(driving_speed, lateral_speed), (-driving_speed, lateral_speed, 0.0)
+
+
 def _case_fingerprint(config: CaseConfig, cad_bytes: bytes) -> str:
     """Identify the same input and settings across separate uploads."""
     parameters = asdict(config)
@@ -124,7 +142,7 @@ async def home(request: Request) -> HTMLResponse:
         {
             "request": request,
             "jobs": jobs,
-            "default_speed": settings.default_farfield_speed,
+            "default_drive_speed": DRIVING_SPEED_MPS,
             "default_project": settings.luminary_project_name,
             "default_transition_model": DEFAULT_TRANSITION_MODEL,
             "default_turbulence_model": DEFAULT_TURBULENCE_MODEL,
@@ -184,11 +202,14 @@ async def run_case(
     cad_label: str = Form(...),
     project_name: str = Form(settings.luminary_project_name),
     farfield_speed: float = Form(settings.default_farfield_speed),
-    ground_speed: float = Form(settings.default_farfield_speed),
+    ground_speed: float = Form(DRIVING_SPEED_MPS),
     farfield_multiplier: float = Form(10.0),
     farfield_padding: str = Form(""),
     farfield_center: str = Form(""),
-    wind_direction: str = Form("1,0,0"),
+    wind_direction: str = Form("-1,0,0"),
+    wind_source: str = Form("manual"),
+    crosswind_magnitude: str = Form("0"),
+    crosswind_flow_direction: str = Form("+y"),
     transition_model: str = Form(DEFAULT_TRANSITION_MODEL),
     turbulence_model: str = Form(DEFAULT_TURBULENCE_MODEL),
     mesh_mode: str = Form(MESH_MODE_FIXED),
@@ -213,7 +234,16 @@ async def run_case(
         raise HTTPException(status_code=400, detail="CAD filename missing.")
 
     farfield_center_vec = _parse_optional_vector(farfield_center, "farfield center")
-    wind_direction_vec = _parse_vector(wind_direction, "wind direction")
+    if not math.isfinite(ground_speed) or ground_speed <= 0:
+        raise HTTPException(status_code=400, detail="Driving speed must be positive and finite.")
+    if wind_source == "crosswind":
+        farfield_speed, wind_direction_vec = _crosswind_apparent_wind(
+            ground_speed, crosswind_magnitude, crosswind_flow_direction
+        )
+    elif wind_source == "manual":
+        wind_direction_vec = _parse_vector(wind_direction, "wind direction")
+    else:
+        raise HTTPException(status_code=400, detail="Invalid wind input mode.")
     transition_model_value = _parse_choice(
         transition_model,
         TRANSITION_MODEL_CHOICES,

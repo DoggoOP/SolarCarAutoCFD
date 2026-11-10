@@ -150,18 +150,39 @@
         </select>
       </div>
       <div>
-        <label for="farfield_speed">Wind speed (m/s)</label>
-        <input id="farfield_speed" name="farfield_speed" type="number" step="0.01" value="{{ default_speed }}" />
+        <label for="ground_speed">Driving speed (m/s)</label>
+        <input id="ground_speed" name="ground_speed" type="number" min="0.01" step="any" value="{{ default_drive_speed }}" required />
+        <small>Sets the moving floor and wheel rotation speed.</small>
       </div>
       <div>
-        <label for="wind_direction">Wind direction (x,y,z)</label>
-        <input id="wind_direction" name="wind_direction" value="-1,0,0" />
-        <small><a href="https://www.desmos.com/calculator/ceatckfi4d" target="_blank" style="color:#4338ca;">Crosswind Calculator</a></small>
+        <label for="crosswind_magnitude">Crosswind magnitude (m/s)</label>
+        <input id="crosswind_magnitude" name="crosswind_magnitude" type="number" min="0" step="any" value="0" required />
+      </div>
+      <div>
+        <label for="crosswind_flow_direction">Crosswind flow direction</label>
+        <select id="crosswind_flow_direction" name="crosswind_flow_direction">
+          <option value="+y" selected>From right (flow toward +Y)</option>
+          <option value="-y">From left (flow toward -Y)</option>
+        </select>
+        <small>Choose the direction the air moves across the car in CAD coordinates.</small>
+      </div>
+      <div class="full">
+        <input id="wind_source" name="wind_source" type="hidden" value="crosswind" />
+        <small id="crosswind_summary" role="status" aria-live="polite"></small>
+      </div>
+      <div>
+        <label for="farfield_speed">Apparent wind speed (m/s)</label>
+        <input id="farfield_speed" name="farfield_speed" type="number" step="any" value="{{ default_drive_speed }}" />
+      </div>
+      <div>
+        <label for="wind_direction">Apparent flow vector (x,y,z)</label>
+        <input id="wind_direction" name="wind_direction" value="-{{ default_drive_speed }},0,0" />
+        <small>Calculated automatically; edit to use a custom wind vector.</small>
       </div>
       <div>
         <label for="crosswind_preset">Crosswind preset</label>
         <select id="crosswind_preset">
-          <option value="">Manual wind settings</option>
+          <option value="">No preset</option>
           <option value="-27.36,1.15,0|27.38">(-27.36, 1.15, 0) at 27.38 m/s</option>
           <option value="-26.71,2.12,0|26.79">(-26.71, 2.12, 0) at 26.79 m/s</option>
           <option value="-25.74,2.77,0|25.89">(-25.74, 2.77, 0) at 25.89 m/s</option>
@@ -169,7 +190,7 @@
           <option value="-23.44,2.77,0|23.6">(-23.44, 2.77, 0) at 23.60 m/s</option>
           <option value="-22.47,2.12,0|22.57">(-22.47, 2.12, 0) at 22.57 m/s</option>
         </select>
-        <small>Fills wind speed and wind direction.</small>
+        <small>Presets replace the calculated wind values.</small>
       </div>
       <div>
         <label for="farfield_multiplier">Farfield size multiplier</label>
@@ -516,6 +537,39 @@
       const crosswindPreset = document.getElementById("crosswind_preset");
       const windDirectionInput = document.getElementById("wind_direction");
       const windSpeedInput = document.getElementById("farfield_speed");
+      const drivingSpeedInput = document.getElementById("ground_speed");
+      const crosswindMagnitudeInput = document.getElementById("crosswind_magnitude");
+      const crosswindFlowDirection = document.getElementById("crosswind_flow_direction");
+      const windSourceInput = document.getElementById("wind_source");
+      const crosswindSummary = document.getElementById("crosswind_summary");
+
+      function applyCrosswind() {
+        const drivingSpeed = Number(drivingSpeedInput.value);
+        const crosswindMagnitude = Number(crosswindMagnitudeInput.value);
+        if (!drivingSpeedInput.value || !crosswindMagnitudeInput.value ||
+            !Number.isFinite(drivingSpeed) || drivingSpeed <= 0 ||
+            !Number.isFinite(crosswindMagnitude) || crosswindMagnitude < 0) {
+          crosswindSummary.textContent = "Enter a positive driving speed and non-negative crosswind magnitude.";
+          return;
+        }
+        const lateralSpeed = crosswindFlowDirection.value === "+y"
+          ? crosswindMagnitude : -crosswindMagnitude;
+        const apparentSpeed = Math.hypot(drivingSpeed, lateralSpeed);
+        const yawDegrees = Math.atan2(crosswindMagnitude, drivingSpeed) * 180 / Math.PI;
+        const vector = [-drivingSpeed, lateralSpeed, 0]
+          .map((component) => Number(component.toFixed(6)).toString()).join(",");
+        windDirectionInput.value = vector;
+        windSpeedInput.value = apparentSpeed.toFixed(4);
+        windSourceInput.value = "crosswind";
+        crosswindPreset.value = "";
+        crosswindSummary.textContent =
+          `Calculated apparent wind: ${apparentSpeed.toFixed(4)} m/s, vector (${vector}), yaw ${yawDegrees.toFixed(2)}°.`;
+      }
+
+      [drivingSpeedInput, crosswindMagnitudeInput].forEach((input) => {
+        input.addEventListener("input", applyCrosswind);
+      });
+      crosswindFlowDirection.addEventListener("change", applyCrosswind);
 
       crosswindPreset.addEventListener("change", (event) => {
         const preset = event.target.value;
@@ -525,13 +579,19 @@
         const [direction, speed] = preset.split("|");
         windDirectionInput.value = direction;
         windSpeedInput.value = speed;
+        windSourceInput.value = "manual";
+        crosswindSummary.textContent = "Using the selected wind preset. Change a crosswind input to recalculate.";
       });
 
       [windDirectionInput, windSpeedInput].forEach((input) => {
         input.addEventListener("input", () => {
           crosswindPreset.value = "";
+          windSourceInput.value = "manual";
+          crosswindSummary.textContent = "Using custom apparent wind values. Change a crosswind input to recalculate.";
         });
       });
+
+      applyCrosswind();
 
       // Toggle wheel surfaces input visibility based on rotating wheels checkbox
       document.getElementById("rotating_wheels").addEventListener("change", (event) => {
