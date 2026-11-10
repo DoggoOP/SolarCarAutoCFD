@@ -16,10 +16,11 @@ def test_identical_active_cfd_submission_reuses_job(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "executor", SimpleNamespace(submit=queued.append))
 
     client = TestClient(main.app)
+    wind_inputs = {"raw_wind_speed": "0", "raw_wind_angle": "90"}
     def submit():
         return client.post(
             "/run",
-            data={"cad_label": "90Deg/6_Bugatti"},
+            data={"cad_label": "90Deg/6_Bugatti", **wind_inputs},
             files={"cad_file": ("car.step", b"same CAD bytes", "application/octet-stream")},
         )
 
@@ -34,7 +35,11 @@ def test_identical_active_cfd_submission_reuses_job(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "_last_submission_time", 0.0)
     different = client.post(
         "/run",
-        data={"cad_label": "90Deg/6_Bugatti", "wind_direction": "0,1,0"},
+        data={
+            "cad_label": "90Deg/6_Bugatti",
+            **wind_inputs,
+            "raw_wind_speed": "3",
+        },
         files={"cad_file": ("car.step", b"same CAD bytes", "application/octet-stream")},
     )
     assert different.status_code == 200
@@ -45,7 +50,7 @@ def test_identical_active_cfd_submission_reuses_job(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "_last_submission_time", 0.0)
     adaptive = client.post(
         "/run",
-        data={"cad_label": "90Deg/6_Bugatti", "mesh_mode": "LUMI_ADAPTATION"},
+        data={"cad_label": "90Deg/6_Bugatti", **wind_inputs, "mesh_mode": "LUMI_ADAPTATION"},
         files={"cad_file": ("car.step", b"same CAD bytes", "application/octet-stream")},
     )
     assert adaptive.status_code == 200
@@ -56,7 +61,7 @@ def test_identical_active_cfd_submission_reuses_job(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "_last_submission_time", 0.0)
     extended = client.post(
         "/run",
-        data={"cad_label": "90Deg/6_Bugatti", "max_iterations": "20000"},
+        data={"cad_label": "90Deg/6_Bugatti", **wind_inputs, "max_iterations": "20000"},
         files={"cad_file": ("car.step", b"same CAD bytes", "application/octet-stream")},
     )
     assert extended.status_code == 200
@@ -78,14 +83,14 @@ def test_identical_active_cfd_submission_reuses_job(monkeypatch, tmp_path):
 
     invalid = client.post(
         "/run",
-        data={"cad_label": "90Deg/6_Bugatti", "mesh_mode": "unsupported"},
+        data={"cad_label": "90Deg/6_Bugatti", **wind_inputs, "mesh_mode": "unsupported"},
         files={"cad_file": ("car.step", b"same CAD bytes", "application/octet-stream")},
     )
     assert invalid.status_code == 400
     for invalid_limit in ("0", "-5", "1.5", "banana"):
         response = client.post(
             "/run",
-            data={"cad_label": "90Deg/6_Bugatti", "max_iterations": invalid_limit},
+            data={"cad_label": "90Deg/6_Bugatti", **wind_inputs, "max_iterations": invalid_limit},
             files={"cad_file": ("car.step", b"same CAD bytes", "application/octet-stream")},
         )
         assert response.status_code == 400

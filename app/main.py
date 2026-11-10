@@ -101,20 +101,32 @@ def _parse_choice(raw: str, allowed: Collection[str], field_name: str) -> str:
     return value
 
 
-def _crosswind_apparent_wind(
-    driving_speed: float, magnitude_raw: str, flow_direction: str
+def _wind_from_clock(
+    driving_speed: float, wind_speed_raw: str, wind_angle_raw: str
 ) -> Tuple[float, Tuple[float, float, float]]:
-    """Combine car headwind with a lateral wind component in CAD axes."""
+    """Convert wind from ahead through the car's right to behind into CFD flow."""
     try:
-        magnitude = float(magnitude_raw)
+        wind_speed = float(wind_speed_raw)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail="Invalid crosswind magnitude.") from exc
-    if not math.isfinite(magnitude) or magnitude < 0:
-        raise HTTPException(status_code=400, detail="Crosswind magnitude must be non-negative and finite.")
-    if flow_direction not in {"+y", "-y"}:
-        raise HTTPException(status_code=400, detail="Crosswind flow direction must be +Y or -Y.")
-    lateral_speed = magnitude if flow_direction == "+y" else -magnitude
-    return math.hypot(driving_speed, lateral_speed), (-driving_speed, lateral_speed, 0.0)
+        raise HTTPException(status_code=400, detail="Invalid raw wind speed.") from exc
+    try:
+        wind_angle = float(wind_angle_raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid raw wind angle.") from exc
+    if not math.isfinite(wind_speed) or wind_speed < 0:
+        raise HTTPException(status_code=400, detail="Raw wind speed must be non-negative and finite.")
+    if not math.isfinite(wind_angle) or not 0 <= wind_angle <= 180:
+        raise HTTPException(status_code=400, detail="Raw wind angle must be 0°–180° (ahead to behind via 3 o'clock).")
+    angle_radians = math.radians(wind_angle)
+    raw_x = -wind_speed * math.cos(angle_radians)
+    raw_y = wind_speed * math.sin(angle_radians)
+    flow_x = -driving_speed + raw_x
+    flow_y = 0.0 if abs(raw_y) < 1e-12 else raw_y
+    flow_x = 0.0 if abs(flow_x) < 1e-12 else flow_x
+    flow_speed = math.hypot(flow_x, flow_y)
+    if flow_speed <= 0 or not math.isfinite(flow_speed):
+        raise HTTPException(status_code=400, detail="The combined airflow speed must be positive and finite.")
+    return flow_speed, (flow_x, flow_y, 0.0)
 
 
 def _case_fingerprint(config: CaseConfig, cad_bytes: bytes) -> str:
@@ -201,15 +213,12 @@ async def run_case(
     cad_file: UploadFile = File(...),
     cad_label: str = Form(...),
     project_name: str = Form(settings.luminary_project_name),
-    farfield_speed: float = Form(settings.default_farfield_speed),
     ground_speed: float = Form(DRIVING_SPEED_MPS),
     farfield_multiplier: float = Form(10.0),
     farfield_padding: str = Form(""),
     farfield_center: str = Form(""),
-    wind_direction: str = Form("-1,0,0"),
-    wind_source: str = Form("manual"),
-    crosswind_magnitude: str = Form("0"),
-    crosswind_flow_direction: str = Form("+y"),
+    raw_wind_speed: str = Form(...),
+    raw_wind_angle: str = Form(...),
     transition_model: str = Form(DEFAULT_TRANSITION_MODEL),
     turbulence_model: str = Form(DEFAULT_TURBULENCE_MODEL),
     mesh_mode: str = Form(MESH_MODE_FIXED),
@@ -236,14 +245,9 @@ async def run_case(
     farfield_center_vec = _parse_optional_vector(farfield_center, "farfield center")
     if not math.isfinite(ground_speed) or ground_speed <= 0:
         raise HTTPException(status_code=400, detail="Driving speed must be positive and finite.")
-    if wind_source == "crosswind":
-        farfield_speed, wind_direction_vec = _crosswind_apparent_wind(
-            ground_speed, crosswind_magnitude, crosswind_flow_direction
-        )
-    elif wind_source == "manual":
-        wind_direction_vec = _parse_vector(wind_direction, "wind direction")
-    else:
-        raise HTTPException(status_code=400, detail="Invalid wind input mode.")
+    farfield_speed, wind_direction_vec = _wind_from_clock(
+        ground_speed, raw_wind_speed, raw_wind_angle
+    )
     transition_model_value = _parse_choice(
         transition_model,
         TRANSITION_MODEL_CHOICES,
