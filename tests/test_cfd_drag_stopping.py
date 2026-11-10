@@ -77,8 +77,8 @@ def test_fixed_mesh_stops_at_shorter_limit_and_checks_drag_from_1000():
     maximum, _ = pipeline._setup_stopping_conditions(
         template, "physics", ["body"], lambda _: None, mesh_mode=MESH_MODE_FIXED
     )
-    assert maximum == FIXED_MESH_MAX_CFD_ITERATIONS == 10000
-    assert template.general["max_iterations"] == 10000
+    assert maximum == FIXED_MESH_MAX_CFD_ITERATIONS == 5000
+    assert template.general["max_iterations"] == 5000
     assert template.conditions[0].start_at_iteration == FIXED_MESH_DRAG_SETTLING_START_ITERATION == 1000
     assert template.conditions[0].threshold == 0.005
 

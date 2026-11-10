@@ -41,15 +41,15 @@ def test_identical_active_cfd_submission_reuses_job(monkeypatch, tmp_path):
     assert different.json()["job_id"] != first.json()["job_id"]
     assert len(queued) == 2
 
-    # The two mesh strategies must create separate comparison runs.
+    # Explicit adaptation must create a distinct run from the fixed default.
     monkeypatch.setattr(main, "_last_submission_time", 0.0)
-    fixed = client.post(
+    adaptive = client.post(
         "/run",
-        data={"cad_label": "90Deg/6_Bugatti", "mesh_mode": "FIXED_MANUAL"},
+        data={"cad_label": "90Deg/6_Bugatti", "mesh_mode": "LUMI_ADAPTATION"},
         files={"cad_file": ("car.step", b"same CAD bytes", "application/octet-stream")},
     )
-    assert fixed.status_code == 200
-    assert fixed.json()["job_id"] != first.json()["job_id"]
+    assert adaptive.status_code == 200
+    assert adaptive.json()["job_id"] != first.json()["job_id"]
     assert len(queued) == 3
 
     # Iteration caps change the CFD setup, so they must not deduplicate a run.
@@ -69,12 +69,12 @@ def test_identical_active_cfd_submission_reuses_job(monkeypatch, tmp_path):
             pass
 
         def run_case(self, config, callback, check_cancelled):
-            received.append(config.max_iterations)
+            received.append((config.mesh_mode, config.max_iterations))
             return {}
 
     monkeypatch.setattr(main, "LuminaryCFDPipeline", FakePipeline)
     queued[-1]()
-    assert received == [20000]
+    assert received == [("FIXED_MANUAL", 20000)]
 
     invalid = client.post(
         "/run",
