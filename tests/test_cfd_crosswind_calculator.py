@@ -62,6 +62,8 @@ def test_form_uses_only_raw_wind_inputs(monkeypatch, tmp_path):
     assert 'name="farfield_speed"' not in html
     assert 'name="wind_direction"' not in html
     assert 'name="crosswind_flow_direction"' not in html
+    assert 'id="cfd_wind_vector"' in html
+    assert 'Calculated CFD wind vector (X, Y, Z; m/s)' in html
 
     def submit(data):
         monkeypatch.setattr(main, "_last_submission_time", 0.0)

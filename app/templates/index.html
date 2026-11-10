@@ -100,6 +100,14 @@
       #result:empty {
         display: none;
       }
+      .wind-vector-output {
+        display: block;
+        padding: 0.65rem;
+        border: 1px solid #c5c9d2;
+        border-radius: 0.35rem;
+        background: #f8fafc;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
     </style>
   </head>
   <body>
@@ -162,6 +170,11 @@
         <label for="raw_wind_angle">Raw wind angle (degrees)</label>
         <input id="raw_wind_angle" name="raw_wind_angle" type="number" min="0" max="180" step="any" value="90" required />
         <small>0° = ahead, 90° = 3 o'clock (right), 180° = behind. Angles stay on the car's right side.</small>
+      </div>
+      <div class="full">
+        <label for="cfd_wind_vector">Calculated CFD wind vector (X, Y, Z; m/s)</label>
+        <output id="cfd_wind_vector" class="wind-vector-output" aria-live="polite">(-{{ default_drive_speed }}, 0, 0)</output>
+        <small>Read-only preview of the airflow sent to Luminary Cloud. +Y is flow from the car's right.</small>
       </div>
       <div>
         <label for="farfield_multiplier">Farfield size multiplier</label>
@@ -504,6 +517,40 @@
       }
 
       setInterval(refreshJobs, 10000);
+
+      const drivingSpeedInput = document.getElementById("ground_speed");
+      const rawWindSpeedInput = document.getElementById("raw_wind_speed");
+      const rawWindAngleInput = document.getElementById("raw_wind_angle");
+      const windVectorOutput = document.getElementById("cfd_wind_vector");
+
+      function updateWindVector() {
+        const drivingSpeed = Number(drivingSpeedInput.value);
+        const rawWindSpeed = Number(rawWindSpeedInput.value);
+        const rawWindAngle = Number(rawWindAngleInput.value);
+        if (!drivingSpeedInput.value || !rawWindSpeedInput.value || !rawWindAngleInput.value ||
+            !Number.isFinite(drivingSpeed) || drivingSpeed <= 0 ||
+            !Number.isFinite(rawWindSpeed) || rawWindSpeed < 0 ||
+            !Number.isFinite(rawWindAngle) || rawWindAngle < 0 || rawWindAngle > 180) {
+          windVectorOutput.textContent = "Enter valid driving speed, wind speed, and angle.";
+          return;
+        }
+        const radians = rawWindAngle * Math.PI / 180;
+        const flowX = -drivingSpeed - rawWindSpeed * Math.cos(radians);
+        const flowY = rawWindSpeed * Math.sin(radians);
+        const flowSpeed = Math.hypot(flowX, flowY);
+        if (!Number.isFinite(flowSpeed) || flowSpeed < 1e-12) {
+          windVectorOutput.textContent = "Combined airflow must be positive and finite.";
+          return;
+        }
+        const clean = (value) => Math.abs(value) < 1e-12 ? 0 : value;
+        windVectorOutput.textContent = `(${[flowX, flowY, 0]
+          .map((value) => clean(value).toFixed(6)).join(", ")})`;
+      }
+
+      [drivingSpeedInput, rawWindSpeedInput, rawWindAngleInput].forEach((input) => {
+        input.addEventListener("input", updateWindVector);
+      });
+      updateWindVector();
 
       // Toggle wheel surfaces input visibility based on rotating wheels checkbox
       document.getElementById("rotating_wheels").addEventListener("change", (event) => {
