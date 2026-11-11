@@ -23,6 +23,7 @@ from luminarycloud.types import Vector3
 
 from .config import Settings
 from .frontal_area import projected_frontal_area
+from .wetted_area import cad_wetted_area
 from .sheets_logger import SheetsLogger
 
 StatusCallback = Callable[[str], None]
@@ -1246,6 +1247,14 @@ class LuminaryCFDPipeline:
         dims = tuple(max(bmax - bmin, 1e-4) for bmin, bmax in zip(bbox_min, bbox_max))
         center = tuple((bmin + bmax) / 2 for bmin, bmax in zip(bbox_min, bbox_max))
 
+        callback("Measuring wetted-area estimate from uploaded CAD...")
+        try:
+            wetted_area = cad_wetted_area(config.cad_path, bbox_min, bbox_max)
+            callback(f"✓ CAD surface area: {wetted_area:.4f} m²")
+        except Exception as exc:
+            wetted_area = None
+            callback(f"Warning: Could not measure CAD surface area: {exc}")
+
         # Project the uploaded car before adding the farfield or generating the CFD mesh.
         if config.frontal_area_override:
             frontal_area = config.frontal_area_override
@@ -1531,7 +1540,7 @@ class LuminaryCFDPipeline:
             callback(f"DEBUG: Failed to extract physics_id ({exc}), using base template ID: {physics_id}")
 
         # Set up stopping conditions and force outputs via API
-        max_iterations, area_output_created = self._setup_stopping_conditions(
+        max_iterations, _area_output_created = self._setup_stopping_conditions(
             template,
             physics_id,
             force_surfaces,
@@ -1626,27 +1635,12 @@ class LuminaryCFDPipeline:
         # Merge CoP results into force_results
         force_results.update(cop_results)
 
-        # Calculate wetted area
-        total_surfaces_count = len(body_surfaces) + len(wheel_surfaces_for_area)
-        callback(f"Calculating wetted area using {total_surfaces_count} surfaces (body + wheels)...")
-        wetted_area = self._calculate_wetted_area(
-            simulation,
-            template,
-            body_surfaces,
-            wheel_surfaces=wheel_surfaces_for_area if wheel_surfaces_for_area else None,
-            area_output_created=area_output_created,
-            callback=callback,
-        )
-        force_results["wetted_area"] = wetted_area
-        if wetted_area > 0:
-            callback(f"✓ Wetted area: {wetted_area:.4f} m²")
-        else:
-            callback("⚠ Wetted area returned 0 - check error above")
+        force_results["wetted_area"] = wetted_area if wetted_area is not None else "N/A"
 
         # Calculate CdA and CdW
         cd = force_results.get("coeff_x", 0)
         force_results["cd_a"] = cd * frontal_area  # Cd × frontal area
-        force_results["cd_w"] = cd * wetted_area if wetted_area > 0 else 0  # Cd × wetted area
+        force_results["cd_w"] = cd * wetted_area if wetted_area is not None else "N/A"
 
         # Run Shellpower solar analysis if enabled
         shellpower_data: Optional[dict] = None
@@ -1727,6 +1721,8 @@ class LuminaryCFDPipeline:
             "mesh_mode": config.mesh_mode,
             "frontal_area_m2": frontal_area,
             "frontal_area_source": frontal_area_source,
+            "wetted_area_m2": wetted_area,
+            "wetted_area_source": "cad_surface" if wetted_area is not None else "unavailable",
             "force_results": force_results,
             "shellpower_data": shellpower_data,
         }
@@ -2297,56 +2293,6 @@ class LuminaryCFDPipeline:
             f"({len(tris)} triangles, {len(new_verts)} vertices)"
         )
         return True
-
-    @staticmethod
-    def _calculate_wetted_area(
-        simulation: lc.Simulation,
-        template: lc.SimulationTemplate,
-        body_surfaces: List[str],
-        wheel_surfaces: Optional[List[str]] = None,
-        area_output_created: bool = False,
-        callback: Optional[StatusCallback] = None,
-    ) -> float:
-        """
-        Calculate wetted area from output definition.
-
-        Note: The Luminary SDK currently doesn't expose a method to download
-        output definition results (area, custom outputs, etc.). The SDK only has:
-        - simulation.download_surface_output() - for on-demand force/moment computation
-        - simulation.download_global_residuals() - for residual data
-
-        Output definitions created via template.create_output_definition() are
-        visible in the Luminary Cloud UI but cannot be downloaded via SDK yet.
-
-        Parameters
-        ----------
-        simulation : lc.Simulation
-            Completed simulation object
-        template : lc.SimulationTemplate
-            Simulation template with output definitions
-        body_surfaces : List[str]
-            List of body surface names
-        wheel_surfaces : Optional[List[str]]
-            List of wheel surface names (if rotating wheels enabled)
-        area_output_created : bool
-            Whether the area output definition was successfully created
-        callback : Optional[StatusCallback]
-            Callback for logging messages
-
-        Returns
-        -------
-        float
-            Wetted area in m² (returns 0.0 - SDK limitation)
-        """
-        if callback:
-            callback("Note: Wetted area download not supported by SDK - returning 0")
-            callback("(Area output is visible in Luminary Cloud UI)")
-
-        # SDK limitation: Cannot download output definition results
-        # Would need: simulation.download_output_definition_results(output_id)
-        # Or: simulation.download_output(output_id)
-        # Neither method exists in SDK v0.22.3
-        return 0.0
 
     @staticmethod
     def _calculate_center_of_pressure(

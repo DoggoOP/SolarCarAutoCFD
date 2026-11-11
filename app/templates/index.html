@@ -301,6 +301,9 @@
           <p style="font-size:0.85rem;color:#64748b;">
             Simulation ID: {{ job.result.simulation_id }}
           </p>
+          {% if job.result.wetted_area_m2 is defined and job.result.wetted_area_m2 is not none %}
+          <p style="font-size:0.85rem;color:#64748b;">CAD wetted-area estimate: {{ "%.4f"|format(job.result.wetted_area_m2) }} m²</p>
+          {% endif %}
           {% if job.result.transition_model or job.result.turbulence_model %}
           <p style="font-size:0.85rem;color:#64748b;">
             CFD models:
@@ -425,6 +428,7 @@
                      <p style="font-size:0.85rem;color:#64748b;">
                        Simulation ID: ${job.result.simulation_id}
                      </p>
+                     ${job.result.wetted_area_m2 != null ? `<p style="font-size:0.85rem;color:#64748b;">CAD wetted-area estimate: ${job.result.wetted_area_m2.toFixed(4)} m²</p>` : ''}
                      ${(job.result.transition_model || job.result.turbulence_model) ? `<p style="font-size:0.85rem;color:#64748b;">
                        CFD models: turbulence ${job.result.turbulence_model || 'N/A'}, transition ${job.result.transition_model || 'N/A'}
                      </p>` : ''}
